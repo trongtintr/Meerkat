@@ -1,0 +1,10 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+
+# .NET build output
+grasshopper/src/**/bin/
+grasshopper/src/**/obj/
+*.user

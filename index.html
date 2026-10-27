@@ -1,0 +1,1647 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Meerkat Web</title>
+<!--
+Meerkat Web - ENVI-met EDX/EDT viewer in the browser (no install, no server)
+Author: Trong-Tin Tran
+Port of the Meerkat Grasshopper components:
+  envimet_edx_reader     -> file loading, variable / plane / slice, legend title, date / time
+  envimet_heatmap        -> cells / smooth / contour (+ isolines, isoline labels, range labels)
+  envimet_point_probe    -> click-to-probe, all variables, CSV export (current or all time steps)
+  envimet_wind_vectors   -> wind arrows on plan / section
+  envimet_wind3d (slice) -> 2D streamlines on plan / section (arc-length RK2)
+Extra: scenario difference (A - B), UTCI stress classes, PNG / CSV export, pan / zoom,
+       wind coloured by speed (gradient + legend), isolines on / off,
+       3D view (buildings from the no-data voxels + the current slice as a textured plane).
+EDT layout: float32 little-endian, order variable -> z -> y -> x, -999 = no data.
+-->
+<style>
+:root{--bg:#f4f5f7;--panel:#fff;--ink:#1d2330;--mute:#6b7280;--line:#e2e5ea;--acc:#c2410c}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font:13px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg)}
+body{display:flex;height:100vh;overflow:hidden}
+aside{width:310px;flex:none;background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:12px 14px 40px}
+h1{font-size:16px;margin:0}
+.sub{color:var(--mute);font-size:12px;margin-bottom:6px}
+fieldset{border:0;border-top:1px solid var(--line);margin:10px 0 0;padding:8px 0 0;min-width:0}
+legend{font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);padding:0}
+label.row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0}
+label.row>span:first-child{flex:none}
+select,input[type=number],input[type=text],textarea{font:inherit;border:1px solid var(--line);border-radius:5px;padding:3px 6px;background:#fff;color:var(--ink);min-width:0}
+label.row select,label.row>input[type=number],label.row>input[type=text]{width:160px}
+textarea{width:100%;resize:vertical;min-height:44px}
+input[type=range]{width:100%}
+input[type=color]{width:48px;height:24px;border:1px solid var(--line);border-radius:4px;padding:0;background:#fff}
+.chk{display:flex;align-items:center;gap:6px;margin:4px 0}
+button{font:inherit;border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:5px;padding:5px 9px;cursor:pointer}
+button:hover{border-color:#c8ccd3}
+button.pri{background:var(--ink);color:#fff;border-color:var(--ink)}
+button:disabled{opacity:.45;cursor:default}
+.btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.hint{font-size:11.5px;color:var(--mute);margin:4px 0}
+.files{font-size:12px;color:var(--mute);margin:4px 0;max-height:96px;overflow:auto}
+.warn{color:#b45309}
+.err{color:#b91c1c}
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+#stage{position:relative;flex:1;min-height:0;background:#fff}
+#cv{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;touch-action:none}
+#drop{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--mute);font-size:15px;pointer-events:none;padding:20px}
+#drop small{font-size:12px;margin-top:4px}
+#stage.over{outline:2px dashed var(--acc);outline-offset:-10px;background:#fff7f2}
+.palPrev{display:block;width:100%;height:12px;border-radius:3px;border:1px solid var(--line);margin:2px 0 4px}
+#viewBar{position:absolute;left:10px;top:10px;z-index:4;display:none;gap:4px}
+#viewBar button{padding:3px 9px;font-size:12px}
+#viewBar button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+#gl3d{position:absolute;inset:0;display:none;cursor:grab;touch-action:none}
+#gl3d canvas{display:block;width:100%!important;height:100%!important}
+#ov3d{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none;z-index:2}
+#tip{position:absolute;pointer-events:none;background:rgba(20,24,33,.92);color:#fff;font-size:12px;padding:5px 7px;border-radius:4px;white-space:pre;display:none;z-index:3}
+#probes{max-height:200px;overflow:auto;background:var(--panel);border-top:1px solid var(--line);display:none}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th,td{padding:3px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th{position:sticky;top:0;background:#fafbfc;font-weight:600}
+td:first-child,th:first-child{text-align:left}
+td button{padding:0 6px;font-size:12px;line-height:18px}
+#status{border-top:1px solid var(--line);background:var(--panel);padding:5px 12px;font-size:12px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:760px){body{flex-direction:column}aside{width:100%;height:44vh;border-right:0;border-bottom:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<aside>
+  <h1>Meerkat Web</h1>
+  <div class="sub">ENVI-met EDX/EDT viewer · Trong-Tin Tran</div>
+
+  <fieldset><legend>Data</legend>
+    <div class="btns">
+      <button class="pri" id="openBtn">Open files…</button>
+      <button id="clearBtn" disabled>Remove all</button>
+      <input type="file" id="fileIn" multiple accept=".edx,.edt,.EDX,.EDT" hidden>
+    </div>
+    <div class="hint">Select or drop .EDX + .EDT pairs (same name). Load several time steps or scenarios at once. Files are read locally, nothing is uploaded.</div>
+    <div class="files" id="fileList"></div>
+    <label class="row"><span>Dataset (A)</span><select id="dsSel" disabled></select></label>
+    <label class="row"><span>Compare (A − B)</span><select id="cmpSel" disabled></select></label>
+    <label class="row"><span>Variable</span><select id="varSel" disabled></select></label>
+  </fieldset>
+
+  <fieldset><legend>Slice</legend>
+    <label class="row"><span>Plane</span>
+      <select id="axisSel">
+        <option value="z">Plan (z level)</option>
+        <option value="x">Section YZ (x column)</option>
+        <option value="y">Section XZ (y row)</option>
+      </select></label>
+    <input type="range" id="kRange" min="0" max="0" value="0" disabled>
+    <div class="hint" id="kLabel">–</div>
+  </fieldset>
+
+  <fieldset><legend>Display</legend>
+    <label class="row"><span>Mode</span>
+      <select id="modeSel">
+        <option value="cells">Cells</option>
+        <option value="smooth">Smooth</option>
+        <option value="contour">Contour</option>
+        <option value="utci">UTCI stress classes</option>
+      </select></label>
+    <label class="row"><span>Contour levels</span><input type="number" id="levels" min="2" max="40" value="10"></label>
+    <label class="row"><span>Smoothing passes</span><input type="number" id="smooth" min="0" max="50" value="0"></label>
+    <label class="chk"><input type="checkbox" id="autoRange" checked>Auto colour range (Δ: symmetric)</label>
+    <label class="row"><span>Min / Max</span>
+      <span style="display:flex;gap:4px"><input type="number" id="vmin" step="any" style="width:78px"><input type="number" id="vmax" step="any" style="width:78px"></span></label>
+    <label class="row"><span>Palette</span>
+      <select id="palSel"></select></label>
+    <canvas class="palPrev" id="palPrev" width="280" height="12"></canvas>
+    <label class="chk"><input type="checkbox" id="palRev">Reverse palette</label>
+    <div class="hint">Custom palette: hex colours from low to high, comma separated</div>
+    <input type="text" id="palCustom" style="width:100%" placeholder="#2c7bb6, #ffffbf, #d7191c">
+    <label class="row"><span>Buildings / no data</span><input type="color" id="bldCol" value="#8f9399"></label>
+    <div class="hint">Contour / UTCI modes – lines and labels switch independently</div>
+    <label class="chk"><input type="checkbox" id="isoShow" checked>Isolines</label>
+    <label class="chk"><input type="checkbox" id="isoLab" checked>Isoline labels</label>
+    <label class="chk"><input type="checkbox" id="isoHoriz">Horizontal isoline labels</label>
+    <label class="chk"><input type="checkbox" id="extremes" checked>Mark min / max cell</label>
+    <label class="chk"><input type="checkbox" id="grid">Cell grid (when zoomed in)</label>
+  </fieldset>
+
+  <fieldset><legend>Legend &amp; title</legend>
+    <label class="row"><span>Decimals</span><input type="number" id="dec" min="0" max="6" value="1"></label>
+    <label class="row"><span>Legend labels</span><input type="number" id="legN" min="2" max="20" value="6"></label>
+    <label class="chk"><input type="checkbox" id="rangeLab">Range labels ("30.0 – 31.0")</label>
+    <label class="row"><span>Isoline label size (px)</span><input type="number" id="labSize" min="7" max="30" value="11"></label>
+    <div class="hint">Map title (multi-line)</div>
+    <textarea id="title" placeholder="e.g. Scenario A – 14:00"></textarea>
+  </fieldset>
+
+  <fieldset><legend>Wind (atmosphere output)</legend>
+    <label class="row"><span>Overlay</span>
+      <select id="windSel">
+        <option value="off">Off</option>
+        <option value="arrows">Arrows</option>
+        <option value="streamlines">Streamlines</option>
+      </select></label>
+    <label class="row"><span>Arrow step (cells)</span><input type="number" id="aStep" min="1" max="50" value="2"></label>
+    <label class="row"><span>Arrow scale</span><input type="number" id="aScale" min="0.05" step="0.1" value="1"></label>
+    <label class="row"><span>Ref. speed (m/s)</span><input type="number" id="aVref" min="0" step="0.1" placeholder="auto"></label>
+    <label class="row"><span>Seed step (cells)</span><input type="number" id="seed" min="1" max="50" value="6"></label>
+    <label class="row"><span>Colour by</span>
+      <select id="wColMode">
+        <option value="speed">Speed (gradient)</option>
+        <option value="single">Single colour</option>
+      </select></label>
+    <label class="row"><span>Speed palette</span>
+      <select id="wPal"></select></label>
+    <canvas class="palPrev" id="wPalPrev" width="280" height="12"></canvas>
+    <label class="chk"><input type="checkbox" id="wPalRev">Reverse speed palette</label>
+    <label class="row"><span>Single colour</span><input type="color" id="wCol" value="#111111"></label>
+    <label class="row"><span>Line width (px)</span><input type="number" id="wWidth" min="0.5" max="6" step="0.5" value="1.5"></label>
+    <div class="hint">Gradient range: 0 … Ref. speed, or the slice min … max when Ref. speed is empty.</div>
+    <div class="hint" id="windHint"></div>
+  </fieldset>
+
+  <fieldset><legend>3D view</legend>
+    <div class="hint">Switch with the 2D / 3D buttons on the map. Drag = orbit, right-drag or Shift+drag = pan, wheel = zoom.</div>
+    <label class="chk"><input type="checkbox" id="bld3d" checked>Show buildings</label>
+    <label class="row"><span>Building opacity</span><input type="number" id="bldOp" min="0.1" max="1" step="0.1" value="0.9"></label>
+    <label class="row"><span>Vertical exaggeration</span><input type="number" id="zScale" min="1" max="10" step="0.5" value="1"></label>
+    <label class="chk"><input type="checkbox" id="box3d" checked>Domain box</label>
+  </fieldset>
+
+  <fieldset><legend>Probe &amp; export</legend>
+    <label class="chk"><input type="checkbox" id="clickProbe" checked>Click on the map adds a probe point</label>
+    <div class="hint">Hover shows the cell value. Drag = pan, wheel = zoom.</div>
+    <div class="btns">
+      <button id="pngBtn" disabled>PNG</button>
+      <select id="pngScale" title="PNG resolution"><option value="2">2×</option><option value="3" selected>3×</option><option value="4">4×</option></select>
+      <button id="sliceCsvBtn" disabled>Slice CSV</button>
+    </div>
+    <div class="btns">
+      <button id="probeCsvBtn" disabled>Probes CSV</button>
+      <button id="probeAllBtn" disabled>Probes · all datasets</button>
+      <button id="probeClrBtn" disabled>Clear probes</button>
+    </div>
+  </fieldset>
+</aside>
+
+<main>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="gl3d"></div>
+    <canvas id="ov3d"></canvas>
+    <div id="viewBar"><button id="v2d" class="on">2D</button><button id="v3d">3D</button><button id="fitBtn">Fit view</button></div>
+    <div id="drop">Drop ENVI-met .EDX + .EDT files here<small>or use “Open files…”</small></div>
+    <div id="tip"></div>
+  </div>
+  <div id="probes"><table><thead id="pHead"></thead><tbody id="pBody"></tbody></table></div>
+  <div id="status">No data loaded.</div>
+</main>
+
+<script>
+'use strict';
+/* ====================================================================================
+   constants
+   ==================================================================================== */
+const NODATA = -999, LIM = NODATA + 1;
+const PAL = {
+  ladybug: [[75,107,169],[115,147,202],[170,200,247],[193,213,208],[245,239,103],[252,230,74],[239,156,21],[234,123,0],[234,74,0],[234,38,0]],
+  viridis: [[68,1,84],[72,40,120],[62,74,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[109,205,89],[180,222,44],[253,231,37]],
+  thermal: [[10,30,120],[30,90,200],[90,170,230],[200,230,240],[255,240,180],[253,190,100],[240,120,50],[200,40,30],[120,0,30]],
+  diverging: [[33,102,172],[67,147,195],[146,197,222],[209,229,240],[247,247,247],[253,219,199],[244,165,130],[214,96,77],[178,24,43]],
+  greys: [[250,250,250],[30,30,30]],
+  ecotect: [[0,0,255],[53,0,202],[107,0,148],[160,0,95],[214,0,41],[255,12,0],[255,66,0],[255,119,0],[255,173,0],[255,226,0],[255,255,0]],
+  leonardo: [[0,0,160],[0,80,255],[0,190,255],[0,230,150],[120,240,0],[255,240,0],[255,160,0],[255,40,0],[200,0,100]],
+  magma: [[0,0,4],[28,16,68],[79,18,123],[129,37,129],[181,54,122],[229,80,100],[251,135,97],[254,194,135],[252,253,191]],
+  inferno: [[0,0,4],[31,12,72],[85,15,109],[136,34,106],[186,54,85],[227,89,51],[249,140,10],[249,201,50],[252,255,164]],
+  plasma: [[13,8,135],[65,4,157],[106,0,168],[143,13,164],[177,42,144],[204,71,120],[225,100,98],[242,132,75],[252,166,54],[252,206,37],[240,249,33]],
+  cividis: [[0,32,77],[0,52,110],[57,72,108],[87,92,109],[112,113,115],[138,134,120],[166,157,117],[196,181,107],[227,206,88],[255,234,70]],
+  turbo: [[48,18,59],[70,107,227],[40,170,226],[26,228,182],[114,254,94],[200,239,52],[250,186,57],[246,114,25],[203,42,4],[122,4,3]],
+  jet: [[0,0,143],[0,0,255],[0,127,255],[0,255,255],[127,255,127],[255,255,0],[255,127,0],[255,0,0],[127,0,0]],
+  spectral: [[94,79,162],[50,136,189],[102,194,165],[171,221,164],[230,245,152],[254,224,139],[253,174,97],[244,109,67],[213,62,79],[158,1,66]],
+  rdylbu: [[49,54,149],[69,117,180],[116,173,209],[171,217,233],[224,243,248],[254,224,144],[253,174,97],[244,109,67],[215,48,39],[165,0,38]],
+  coolwarm: [[59,76,192],[98,130,234],[141,176,254],[184,208,249],[221,221,221],[245,196,173],[244,154,123],[222,96,77],[180,4,38]],
+  brbg: [[84,48,5],[140,81,10],[191,129,45],[223,194,125],[246,232,195],[245,245,245],[199,234,229],[128,205,193],[53,151,143],[1,102,94],[0,60,48]],
+  puor: [[127,59,8],[179,88,6],[224,130,20],[253,184,99],[254,224,182],[247,247,247],[216,218,235],[178,171,210],[128,115,172],[84,39,136],[45,0,75]],
+  ylorrd: [[255,255,204],[255,237,160],[254,217,118],[254,178,76],[253,141,60],[252,78,42],[227,26,28],[189,0,38],[128,0,38]],
+  ylgnbu: [[255,255,217],[237,248,177],[199,233,180],[127,205,187],[65,182,196],[29,145,192],[34,94,168],[37,52,148],[8,29,88]],
+  blues: [[247,251,255],[222,235,247],[198,219,239],[158,202,225],[107,174,214],[66,146,198],[33,113,181],[8,81,156],[8,48,107]],
+  reds: [[255,245,240],[254,224,210],[252,187,161],[252,146,114],[251,106,74],[239,59,44],[203,24,29],[165,15,21],[103,0,13]],
+  greens: [[247,252,245],[229,245,224],[199,233,192],[161,217,155],[116,196,118],[65,171,93],[35,139,69],[0,109,44],[0,68,27]],
+  purples: [[252,251,253],[239,237,245],[218,218,235],[188,189,220],[158,154,200],[128,125,186],[106,81,163],[84,39,143],[63,0,125]]
+};
+/* palette menu: [group, [key, label] ...] */
+const PAL_MENU = [
+  ['Ladybug / ENVI-met', [['ladybug', 'Ladybug (default)'], ['ecotect', 'Ecotect'], ['leonardo', 'Leonardo-style rainbow'], ['thermal', 'Thermal']]],
+  ['Perceptual (sequential)', [['viridis', 'Viridis'], ['magma', 'Magma'], ['inferno', 'Inferno'], ['plasma', 'Plasma'], ['cividis', 'Cividis (colour-blind safe)'], ['turbo', 'Turbo']]],
+  ['Single hue / ColorBrewer', [['ylorrd', 'Yellow-Orange-Red'], ['ylgnbu', 'Yellow-Green-Blue'], ['blues', 'Blues'], ['reds', 'Reds'], ['greens', 'Greens'], ['purples', 'Purples'], ['greys', 'Greys']]],
+  ['Diverging (good for Δ)', [['diverging', 'Red-Blue'], ['rdylbu', 'Red-Yellow-Blue'], ['coolwarm', 'Cool-Warm'], ['spectral', 'Spectral'], ['brbg', 'Brown-Teal'], ['puor', 'Orange-Purple']]],
+  ['Other', [['jet', 'Jet (rainbow)'], ['custom', 'Custom (hex list)']]]
+];
+function parseHexList(s) {
+  const out = [];
+  for (const m of String(s || '').matchAll(/#?([0-9a-f]{6}|[0-9a-f]{3})\b/gi)) {
+    let h = m[1]; if (h.length === 3) h = h.replace(/./g, c => c + c);
+    out.push(hexRGB('#' + h));
+  }
+  return out;
+}
+/* palette by key, optionally reversed; custom falls back to Ladybug when < 2 colours */
+function getPal(key, rev) {
+  let p = key === 'custom' ? parseHexList($('palCustom').value) : PAL[key];
+  if (!p || p.length < 2) p = PAL.ladybug;
+  return rev ? p.slice().reverse() : p;
+}
+function fillPalSel(id, withAuto, def) {
+  const sel = $(id);
+  sel.innerHTML = (withAuto ? '<option value="auto">Auto (Ladybug / Red-Blue for Δ)</option>' : '') +
+    PAL_MENU.map(([g, items]) => `<optgroup label="${g}">` +
+      items.map(([k, l]) => `<option value="${k}">${l}</option>`).join('') + '</optgroup>').join('');
+  sel.value = def;
+}
+function drawPalPreview(id, pal) {
+  const c = $(id), ctx = c.getContext('2d'), lut = makeLut(pal);
+  for (let x = 0; x < c.width; x++) {
+    const q = lut[Math.round(x / (c.width - 1) * 255)];
+    ctx.fillStyle = `rgb(${q[0]},${q[1]},${q[2]})`; ctx.fillRect(x, 0, 1, c.height);
+  }
+}
+const UTCI = [
+  {lo: -Infinity, hi: -40, name: 'Extreme cold stress', c: [23,36,107]},
+  {lo: -40, hi: -27, name: 'Very strong cold stress', c: [38,72,160]},
+  {lo: -27, hi: -13, name: 'Strong cold stress', c: [50,120,200]},
+  {lo: -13, hi: 0, name: 'Moderate cold stress', c: [110,170,225]},
+  {lo: 0, hi: 9, name: 'Slight cold stress', c: [175,215,240]},
+  {lo: 9, hi: 26, name: 'No thermal stress', c: [160,210,140]},
+  {lo: 26, hi: 32, name: 'Moderate heat stress', c: [253,205,95]},
+  {lo: 32, hi: 38, name: 'Strong heat stress', c: [247,140,45]},
+  {lo: 38, hi: 46, name: 'Very strong heat stress', c: [218,55,35]},
+  {lo: 46, hi: Infinity, name: 'Extreme heat stress', c: [130,10,25]}
+];
+const FONT = 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif';
+
+const $ = id => document.getElementById(id);
+const S = {sets: [], pending: {}, curKey: null, data: null, F: null, view: null,
+           probes: [], nextProbe: 1, token: 0, ms: 0};
+const cv = $('cv');
+
+/* ====================================================================================
+   small helpers
+   ==================================================================================== */
+const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+function tag(txt, name) {
+  const m = new RegExp('<' + name + '>([\\s\\S]*?)</' + name + '>', 'i').exec(txt);
+  return m ? m[1].trim() : null;
+}
+const floats = s => (s || '').split(/[,\s]+/).filter(x => x !== '').map(Number);
+function edges(sp) { const e = [0]; for (const d of sp) e.push(e[e.length - 1] + d); return e; }
+function centers(e) { const c = []; for (let i = 0; i < e.length - 1; i++) c.push((e[i] + e[i + 1]) / 2); return c; }
+const pad2 = n => String(n).padStart(2, '0');
+function fmtN(v, d) {
+  if (v === null || v === undefined || !isFinite(v)) return '–';
+  const s = v.toFixed(d);
+  return /^-0\.?0*$/.test(s) ? s.slice(1) : s;
+}
+function unitOf(name) { const m = /\(([^()]*)\)\s*$/.exec(name || ''); return m ? m[1].trim() : ''; }
+function shortName(name) { return String(name).replace(/\s*\(.*?\)\s*$/, '').trim(); }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
+function hexRGB(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+function wrap(text, width) {
+  const lines = []; let cur = '';
+  for (const w of String(text).split(/\s+/).filter(Boolean)) {
+    if (cur && cur.length + 1 + w.length > width) { lines.push(cur); cur = w; }
+    else cur = (cur + ' ' + w).trim();
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [''];
+}
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function download(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+function status(msg, isErr) {
+  const el = $('status'); el.textContent = msg; el.className = isErr ? 'err' : '';
+}
+function makeLut(pal) {
+  const n = pal.length - 1, lut = [];
+  for (let s = 0; s < 256; s++) {
+    const t = s / 255 * n, i = Math.min(Math.floor(t), n - 1), f = t - i, a = pal[i], b = pal[i + 1];
+    lut.push([Math.round(a[0] + (b[0] - a[0]) * f), Math.round(a[1] + (b[1] - a[1]) * f), Math.round(a[2] + (b[2] - a[2]) * f)]);
+  }
+  return lut;
+}
+/* index of the interval of sorted edges e containing x, or -1 */
+function locEdge(e, x) {
+  const n = e.length;
+  if (!(x >= e[0]) || !(x < e[n - 1])) return -1;
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (e[m] <= x) lo = m; else hi = m; }
+  return lo;
+}
+/* locator on cell centres: x -> [i, t] or null (outside) */
+function makeLoc(c) {
+  const n = c.length;
+  if (n < 2) return () => null;
+  return x => {
+    if (!(x >= c[0]) || !(x <= c[n - 1])) return null;
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (c[m] <= x) lo = m; else hi = m; }
+    return [lo, (x - c[lo]) / (c[lo + 1] - c[lo])];
+  };
+}
+
+/* ====================================================================================
+   EDX / EDT reading  (envimet_edx_reader)
+   ==================================================================================== */
+function decodeText(buf) {
+  let t;
+  try { t = new TextDecoder('utf-8', {fatal: true}).decode(buf); }
+  catch (e) { t = new TextDecoder('windows-1252').decode(buf); }
+  for (const [b, g] of [['\u00c3\u201a\u00c2\u00b0', '\u00b0'], ['\u00c2\u00b0', '\u00b0'], ['\u00c2\u00b2', '\u00b2'],
+                        ['\u00c2\u00b3', '\u00b3'], ['\u00c2\u00b5', '\u00b5']]) t = t.split(b).join(g);
+  return t;
+}
+function parseDT(txt, name) {
+  let d = tag(txt, 'simulation_date'), t = tag(txt, 'simulation_time');
+  if (!d) { const m = /(\d{4})[-_.](\d{2})[-_.](\d{2})/.exec(name); d = m ? `${m[1]}-${m[2]}-${m[3]}` : null; }
+  if (!t) { const m = /\d{4}[-_.]\d{2}[-_.]\d{2}[_ ](\d{2})[.:]?(\d{2})(?:[.:](\d{2}))?/.exec(name); t = m ? `${m[1]}:${m[2]}` : null; }
+  let date = null, time = null, hour = null;
+  if (d) {
+    const n = d.match(/\d+/g) || [];
+    if (n.length >= 3) {
+      let y, mo, dd;
+      if (n[0].length === 4) [y, mo, dd] = n; else [dd, mo, y] = n;   // YYYY-MM-DD or DD.MM.YYYY
+      date = `${String(+y).padStart(4, '0')}-${pad2(+mo)}-${pad2(+dd)}`;
+    }
+  }
+  if (t) { const n = (t.match(/\d+/g) || []).concat(['0', '0']); hour = +n[0]; time = `${pad2(+n[0])}:${pad2(+n[1])}`; }
+  return {date, time, hour};
+}
+async function parseEDX(file) {
+  const txt = decodeText(await file.arrayBuffer());
+  const nx = parseInt(tag(txt, 'nr_xdata')), ny = parseInt(tag(txt, 'nr_ydata')), nz = parseInt(tag(txt, 'nr_zdata'));
+  if (!(nx > 0 && ny > 0 && nz > 0)) throw new Error(file.name + ': no grid size in header (not an ENVI-met EDX file?)');
+  const dx = floats(tag(txt, 'spacing_x')), dy = floats(tag(txt, 'spacing_y')), dz = floats(tag(txt, 'spacing_z'));
+  if (dx.length !== nx || dy.length !== ny || dz.length !== nz) throw new Error(file.name + ': spacing does not match grid size');
+  const vars = (tag(txt, 'name_variables') || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!vars.length) throw new Error(file.name + ': no variables listed');
+  const xe = edges(dx), ye = edges(dy), ze = edges(dz);
+  return Object.assign({nx, ny, nz, dx, dy, dz, xe, ye, ze, xc: centers(xe), yc: centers(ye), zc: centers(ze), vars},
+                       parseDT(txt, file.name));
+}
+async function readF32(file, offFloats, count) {
+  const buf = await file.slice(offFloats * 4, (offFloats + count) * 4).arrayBuffer();
+  if (buf.byteLength < count * 4) throw new Error(file.name + ': file is shorter than the header says');
+  return new Float32Array(buf);
+}
+function cacheGet(ds, key, make) {
+  const c = ds.cache;
+  if (c.has(key)) { const v = c.get(key); c.delete(key); c.set(key, v); return v; }
+  const p = make(); c.set(key, p);
+  p.catch(() => c.delete(key));
+  while (c.size > 16) c.delete(c.keys().next().value);
+  return p;
+}
+function varBlock(ds, vi) {
+  const {nx, ny, nz} = ds.h, n3 = nx * ny * nz;
+  return cacheGet(ds, 'v' + vi, () => readF32(ds.edt, vi * n3, n3));
+}
+async function zLevel(ds, vi, k) {
+  const {nx, ny, nz} = ds.h, n2 = nx * ny;
+  if (ds.cache.has('v' + vi)) return (await varBlock(ds, vi)).subarray(k * n2, (k + 1) * n2);
+  return cacheGet(ds, 'z' + vi + '_' + k, () => readF32(ds.edt, (vi * nz + k) * n2, n2));
+}
+/* 2D slice: a = horizontal screen axis, b = vertical screen axis; vals[b * na + a] */
+async function getSlice(ds, vi, axis, k) {
+  const h = ds.h, {nx, ny, nz} = h, n2 = nx * ny;
+  if (axis === 'z') {
+    const d = await zLevel(ds, vi, k);
+    return {na: nx, nb: ny, ea: h.xe, eb: h.ye, vals: Float32Array.from(d)};
+  }
+  const d = await varBlock(ds, vi);
+  if (axis === 'x') {                                     // YZ section at column i = k
+    const v = new Float32Array(ny * nz);
+    for (let kk = 0; kk < nz; kk++) for (let j = 0; j < ny; j++) v[kk * ny + j] = d[kk * n2 + j * nx + k];
+    return {na: ny, nb: nz, ea: h.ye, eb: h.ze, vals: v};
+  }
+  const v = new Float32Array(nx * nz);                    // XZ section at row j = k
+  for (let kk = 0; kk < nz; kk++) for (let i = 0; i < nx; i++) v[kk * nx + i] = d[kk * n2 + k * nx + i];
+  return {na: nx, nb: nz, ea: h.xe, eb: h.ze, vals: v};
+}
+const cellIJK = (axis, k, a, b) => axis === 'z' ? [a, b, k] : axis === 'x' ? [k, a, b] : [a, k, b];
+function windIdx(h) {
+  const f = p => h.vars.findIndex(n => norm(n).startsWith(p));
+  const r = [f('flowu'), f('flowv'), f('floww')];
+  return r.every(i => i >= 0) ? r : null;
+}
+
+/* ====================================================================================
+   UI state
+   ==================================================================================== */
+function ui() {
+  const g = id => $(id);
+  const n = (id, d) => { const v = parseFloat(g(id).value); return isFinite(v) ? v : d; };
+  const ci = (id, lo, hi, d) => Math.round(Math.min(hi, Math.max(lo, n(id, d))));
+  return {
+    var: (+g('varSel').value) || 0, axis: g('axisSel').value, k: (+g('kRange').value) || 0, cmp: g('cmpSel').value || '',
+    mode: g('modeSel').value, levels: ci('levels', 2, 40, 10), smooth: ci('smooth', 0, 50, 0),
+    auto: g('autoRange').checked, vmin: n('vmin', NaN), vmax: n('vmax', NaN), pal: g('palSel').value, bld: g('bldCol').value,
+    isoLab: g('isoLab').checked, isoHoriz: g('isoHoriz').checked, extremes: g('extremes').checked, grid: g('grid').checked,
+    dec: ci('dec', 0, 6, 1), legN: ci('legN', 2, 20, 6), rangeLab: g('rangeLab').checked, labSize: Math.min(30, Math.max(7, n('labSize', 11))),
+    title: g('title').value, wind: g('windSel').value, aStep: ci('aStep', 1, 50, 2), aScale: Math.max(0.05, n('aScale', 1)),
+    aVref: n('aVref', 0), seed: ci('seed', 1, 50, 6), wCol: g('wCol').value, clickProbe: g('clickProbe').checked,
+    isoShow: g('isoShow').checked, palRev: g('palRev').checked, wPalRev: g('wPalRev').checked, wColMode: g('wColMode').value, wPal: g('wPal').value,
+    wWidth: Math.min(6, Math.max(0.5, n('wWidth', 1.5))),
+    bld3d: g('bld3d').checked, bldOp: Math.min(1, Math.max(0.1, n('bldOp', 0.9))),
+    zScale: Math.min(10, Math.max(1, n('zScale', 1))), box3d: g('box3d').checked
+  };
+}
+const curDS = () => S.sets.find(d => d.key === S.curKey) || null;
+
+/* ====================================================================================
+   files
+   ==================================================================================== */
+async function addFiles(list) {
+  const msgs = [];
+  for (const f of list) {
+    const m = /^(.*)\.(edx|edt)$/i.exec(f.name);
+    if (!m) { msgs.push(f.name + ': not .EDX / .EDT, ignored'); continue; }
+    const b = m[1].toLowerCase();
+    const p = S.pending[b] || (S.pending[b] = {base: m[1]});
+    p[m[2].toLowerCase()] = f;
+  }
+  for (const b of Object.keys(S.pending)) {
+    const p = S.pending[b];
+    if (!(p.edx && p.edt)) continue;
+    delete S.pending[b];
+    try {
+      const h = await parseEDX(p.edx);
+      const need = h.vars.length * h.nx * h.ny * h.nz * 4;
+      const ds = {key: b, name: p.base, edx: p.edx, edt: p.edt, h, cache: new Map(),
+                  warn: p.edt.size < need ? `EDT smaller than expected (${p.edt.size} of ${need} bytes)` : ''};
+      ds.label = [h.date, h.time].filter(Boolean).join(' ') || ds.name;
+      const old = S.sets.findIndex(d => d.key === b);
+      if (old >= 0) S.sets.splice(old, 1, ds); else S.sets.push(ds);
+      for (const pr of S.probes) pr.vals.delete(b);
+    } catch (e) { msgs.push(e.message); }
+  }
+  const sk = d => (d.h.date || '') + ' ' + (d.h.time || '') + ' ' + d.name;
+  S.sets.sort((a, b) => sk(a).localeCompare(sk(b)));
+  listFiles(msgs);
+  if (S.sets.length && !curDS()) { S.curKey = S.sets[0].key; }
+  fillDatasetSel();
+  if (S.sets.length) await onDataset(true);
+}
+function listFiles(msgs) {
+  const rows = S.sets.map(d => `<div>• ${esc(d.name)} <span>(${d.h.nx}×${d.h.ny}×${d.h.nz}, ${d.h.vars.length} var)</span>` +
+                                (d.warn ? ` <span class="warn">${esc(d.warn)}</span>` : '') + '</div>');
+  for (const p of Object.values(S.pending))
+    rows.push(`<div class="warn">• ${esc(p.base)}: waiting for ${p.edx ? '.EDT' : '.EDX'}</div>`);
+  for (const m of msgs || []) rows.push(`<div class="err">${esc(m)}</div>`);
+  $('fileList').innerHTML = rows.join('');
+  $('clearBtn').disabled = !S.sets.length && !Object.keys(S.pending).length;
+}
+function fillDatasetSel() {
+  const sel = $('dsSel');
+  sel.innerHTML = S.sets.map(d => `<option value="${esc(d.key)}">${esc(d.label === d.name ? d.name : d.label + ' · ' + d.name)}</option>`).join('');
+  sel.value = S.curKey || '';
+  sel.disabled = !S.sets.length;
+}
+function fillCmpSel() {
+  const ds = curDS(), sel = $('cmpSel'), old = sel.value;
+  const ok = S.sets.filter(d => d !== ds && d.h.nx === ds.h.nx && d.h.ny === ds.h.ny && d.h.nz === ds.h.nz);
+  sel.innerHTML = '<option value="">None</option>' +
+    ok.map(d => `<option value="${esc(d.key)}">${esc(d.label === d.name ? d.name : d.label + ' · ' + d.name)}</option>`).join('');
+  sel.value = ok.some(d => d.key === old) ? old : '';
+  sel.disabled = !ok.length;
+}
+function fillVarSel() {
+  const ds = curDS(), sel = $('varSel');
+  const oldName = sel.options.length ? norm(sel.options[sel.selectedIndex].dataset.n || '') : '';
+  sel.innerHTML = ds.h.vars.map((v, i) => `<option value="${i}" data-n="${esc(v)}">${i}: ${esc(v)}</option>`).join('');
+  let vi = oldName ? ds.h.vars.findIndex(v => norm(v) === oldName) : -1;
+  if (vi < 0) {                                               // sensible default
+    const pref = ['utci', 'pottemperature', 'airtemperature', 'tmrt', 'meanradianttemperature'];
+    for (const p of pref) { vi = ds.h.vars.findIndex(v => norm(v).startsWith(p)); if (vi >= 0) break; }
+  }
+  sel.value = String(Math.max(0, vi));
+  sel.disabled = false;
+}
+function setSliceRange(resetK) {
+  const ds = curDS(), axis = $('axisSel').value, h = ds.h, r = $('kRange');
+  const n = axis === 'z' ? h.nz : axis === 'x' ? h.nx : h.ny;
+  r.max = n - 1; r.disabled = false;
+  if (resetK || +r.value > n - 1) {
+    if (axis === 'z') {                                       // pedestrian level ~1.4 m
+      let best = 0;
+      h.zc.forEach((z, i) => { if (Math.abs(z - 1.4) < Math.abs(h.zc[best] - 1.4)) best = i; });
+      r.value = best;
+    } else r.value = Math.floor(n / 2);
+  }
+  kLabel();
+}
+function kLabel() {
+  const ds = curDS(); if (!ds) return;
+  const axis = $('axisSel').value, k = +$('kRange').value, h = ds.h;
+  const t = axis === 'z' ? `level k = ${k} · z = ${fmtN(h.zc[k], 2)} m` :
+            axis === 'x' ? `column i = ${k} · x = ${fmtN(h.xc[k], 2)} m` : `row j = ${k} · y = ${fmtN(h.yc[k], 2)} m`;
+  $('kLabel').textContent = t;
+}
+async function onDataset(resetK) {
+  const ds = curDS(); if (!ds) return;
+  const prev = S.data && S.data.ds;
+  const sameDims = prev && prev.h.nx === ds.h.nx && prev.h.ny === ds.h.ny && prev.h.nz === ds.h.nz;
+  fillVarSel(); fillCmpSel(); setSliceRange(resetK && !sameDims);
+  windHint();
+  for (const b of ['pngBtn', 'sliceCsvBtn']) $(b).disabled = false;
+  $('drop').style.display = 'none'; $('viewBar').style.display = 'flex';
+  await refresh(!sameDims);
+}
+function windHint() {
+  const ds = curDS();
+  $('windHint').textContent = !ds ? '' : windIdx(ds.h) ? 'Flow u / v / w found.' :
+    'This file has no Flow u / v / w – load an atmosphere output for wind.';
+}
+
+/* ====================================================================================
+   data -> processing -> drawing
+   ==================================================================================== */
+async function refresh(refit) {
+  const ds = curDS(); if (!ds) return;
+  const t = ++S.token, u = ui();
+  try {
+    const A = await getSlice(ds, u.var, u.axis, u.k);
+    let vals = A.vals, diff = null;
+    if (u.cmp) {
+      const B = S.sets.find(d => d.key === u.cmp);
+      const vn = norm(ds.h.vars[u.var]), vb = B.h.vars.findIndex(n => norm(n) === vn);
+      if (vb < 0) throw new Error(`"${ds.h.vars[u.var]}" is not in ${B.name}`);
+      const Bs = await getSlice(B, vb, u.axis, u.k);
+      vals = new Float32Array(A.vals.length);
+      for (let q = 0; q < vals.length; q++) {
+        const a = A.vals[q], b = Bs.vals[q];
+        vals[q] = (a > LIM && b > LIM) ? a - b : NaN;
+      }
+      diff = B;
+    }
+    let wind = null;
+    const iw = windIdx(ds.h);
+    if (u.wind !== 'off' && iw) {
+      const [U, V, W] = (await Promise.all(iw.map(i => getSlice(ds, i, u.axis, u.k)))).map(s => s.vals);
+      const n = U.length, wf = new Uint8Array(n);
+      for (let q = 0; q < n; q++) if (U[q] <= LIM || V[q] <= LIM || W[q] <= LIM) wf[q] = 1;
+      wind = {hc: u.axis === 'x' ? V : U, vc: u.axis === 'z' ? V : W, wf};
+    }
+    if (t !== S.token) return;
+    S.data = Object.assign({}, A, {vals, diff, wind, ds, axis: u.axis, k: u.k, vi: u.var});
+    if (refit || !S.view) fit();
+    process();
+    draw();
+    syncProbes();
+  } catch (e) {
+    if (t === S.token) status(e.message, true);
+  }
+}
+
+function process() {
+  const D = S.data; if (!D) { S.F = null; return; }
+  const u = ui(), {na, nb, ea, eb, vals} = D, N = na * nb, NA = na + 1, NN = NA * (nb + 1);
+  const filled = new Uint8Array(N);
+  let dmin = Infinity, dmax = -Infinity, imin = -1, imax = -1;
+  for (let q = 0; q < N; q++) {
+    const v = vals[q];
+    if (!(v > LIM) || !isFinite(v)) { filled[q] = 1; continue; }
+    if (v < dmin) { dmin = v; imin = q; }
+    if (v > dmax) { dmax = v; imax = q; }
+  }
+  const F = {filled, dmin, dmax, imin, imax, mode: u.mode, valid: imax >= 0};
+  S.F = F;
+  if (!F.valid) return;
+
+  // ---- colour range
+  let vmin, vmax;
+  if (u.auto) {
+    if (D.diff) { const m = Math.max(Math.abs(dmin), Math.abs(dmax)) || 1; vmin = -m; vmax = m; }
+    else { vmin = dmin; vmax = dmax; }
+    const d = Math.abs(vmax - vmin) < 10 ? 3 : 2;
+    $('vmin').value = +vmin.toFixed(d); $('vmax').value = +vmax.toFixed(d);
+  } else {
+    vmin = isFinite(u.vmin) ? u.vmin : dmin; vmax = isFinite(u.vmax) ? u.vmax : dmax;
+  }
+  if (vmax - vmin < 1e-9) vmax = vmin + 1e-6;
+  F.vmin = vmin; F.vmax = vmax; F.span = 255 / (vmax - vmin);
+  F.lut = makeLut(getPal(u.pal === 'auto' ? (D.diff ? 'diverging' : 'ladybug') : u.pal, u.palRev));
+  const lutOf = v => { const s = Math.round((v - vmin) * F.span); return F.lut[s < 0 ? 0 : s > 255 ? 255 : s]; };
+
+  if (u.mode !== 'cells') {
+    // ---- vertex values: average of the non-filled cells around each node
+    const acc = new Float64Array(NN), cnt = new Uint16Array(NN);
+    for (let b = 0; b < nb; b++) for (let a = 0; a < na; a++) {
+      const q = b * na + a; if (filled[q]) continue;
+      const v = vals[q], n0 = b * NA + a;
+      for (const n of [n0, n0 + 1, n0 + NA, n0 + NA + 1]) { acc[n] += v; cnt[n]++; }
+    }
+    let node = new Float64Array(NN);
+    for (let n = 0; n < NN; n++) node[n] = cnt[n] ? acc[n] / cnt[n] : NaN;
+
+    // ---- Laplacian smoothing over the cell edges of non-filled cells
+    if (u.smooth) {
+      const ep = [];
+      const ok = (a, b) => a >= 0 && b >= 0 && a < na && b < nb && !filled[b * na + a];
+      for (let b = 0; b <= nb; b++) for (let a = 0; a < na; a++)          // horizontal edges
+        if (ok(a, b) || ok(a, b - 1)) ep.push(b * NA + a, b * NA + a + 1);
+      for (let a = 0; a <= na; a++) for (let b = 0; b < nb; b++)          // vertical edges
+        if (ok(a, b) || ok(a - 1, b)) ep.push(b * NA + a, (b + 1) * NA + a);
+      for (let it = 0; it < u.smooth; it++) {
+        const s = new Float64Array(NN), c = new Uint16Array(NN);
+        for (let n = 0; n < NN; n++) { s[n] = isNaN(node[n]) ? 0 : node[n]; c[n] = 1; }
+        for (let e = 0; e < ep.length; e += 2) {
+          const p = ep[e], q = ep[e + 1];
+          s[p] += node[q]; s[q] += node[p]; c[p]++; c[q]++;
+        }
+        const nn = new Float64Array(NN);
+        for (let n = 0; n < NN; n++) nn[n] = isNaN(node[n]) ? NaN : s[n] / c[n];
+        node = nn;
+      }
+    }
+    F.node = node;
+
+    if (u.mode === 'contour' || u.mode === 'utci') {
+      let bounds, bandCol, uniform = false;
+      if (u.mode === 'contour') {
+        const L = u.levels, step = (vmax - vmin) / L;
+        bounds = []; for (let i = 0; i <= L; i++) bounds.push(vmin + step * i);
+        bandCol = []; for (let i = 0; i < L; i++) bandCol.push(lutOf(vmin + step * (i + 0.5)));
+        const cn = new Float64Array(NN);                            // clamped vertex values
+        for (let n = 0; n < NN; n++) cn[n] = Math.min(vmax, Math.max(vmin, node[n]));
+        F.node = cn; uniform = true;
+        const inv = 1 / step, L1 = L - 1;
+        F.band = v => { const i = Math.floor((v - vmin) * inv); return i < 0 ? 0 : i > L1 ? L1 : i; };
+      } else {
+        bounds = UTCI.map(c => Math.max(-1e6, c.lo)).concat([1e6]);
+        bandCol = UTCI.map(c => c.c);
+        const L1 = bandCol.length - 1;
+        F.band = v => { let i = 0; while (i < L1 && v >= bounds[i + 1]) i++; return i; };
+      }
+      F.bounds = bounds; F.bandCol = bandCol; F.uniform = uniform;
+      F.iso = isolines(D, F);
+    }
+  }
+  if (D.wind) F.wind = prepWind(D, u);
+}
+
+/* isolines: per triangle (cell split along n0-n2, as in the GH component), chained through
+   shared mesh edges -> exact, continuous polylines */
+function isolines(D, F) {
+  const {na, nb, ea, eb} = D, NA = na + 1, NN = NA * (nb + 1), cn = F.node, B = F.bounds, nB = B.length;
+  const adj = [], pts = [];
+  for (let i = 0; i < nB; i++) { adj.push(new Map()); pts.push(new Map()); }
+  const px = n => ea[n % NA], py = n => eb[(n / NA) | 0];
+  const ids = [0, 0, 0], vs = [0, 0, 0];
+  function tri(i0, i1, i2) {
+    ids[0] = i0; ids[1] = i1; ids[2] = i2; vs[0] = cn[i0]; vs[1] = cn[i1]; vs[2] = cn[i2];
+    const lo = Math.min(vs[0], vs[1], vs[2]), hi = Math.max(vs[0], vs[1], vs[2]);
+    if (!(hi > lo)) return;
+    for (let li = 1; li < nB - 1; li++) {
+      const lv = B[li];
+      if (!(lo < lv && lv <= hi)) continue;
+      const ks = [];
+      for (let e = 0; e < 3; e++) {
+        const a = ids[e], b = ids[(e + 1) % 3];
+        if ((vs[e] < lv) !== (vs[(e + 1) % 3] < lv)) {
+          const l = a < b ? a : b, h = a < b ? b : a, key = l * NN + h;
+          ks.push(key);
+          const P = pts[li];
+          if (!P.has(key)) {
+            const t = (lv - cn[l]) / (cn[h] - cn[l]);
+            P.set(key, [px(l) + (px(h) - px(l)) * t, py(l) + (py(h) - py(l)) * t]);
+          }
+        }
+      }
+      if (ks.length === 2) {
+        const A = adj[li];
+        if (!A.has(ks[0])) A.set(ks[0], []);
+        if (!A.has(ks[1])) A.set(ks[1], []);
+        A.get(ks[0]).push(ks[1]); A.get(ks[1]).push(ks[0]);
+      }
+    }
+  }
+  for (let b = 0; b < nb; b++) for (let a = 0; a < na; a++) {
+    if (F.filled[b * na + a]) continue;
+    const n0 = b * NA + a, n1 = n0 + 1, n3 = n0 + NA, n2 = n3 + 1;
+    tri(n0, n1, n2); tri(n0, n2, n3);
+  }
+  const out = [];
+  for (let li = 1; li < nB - 1; li++) {
+    const A = adj[li]; if (!A.size) continue;
+    const seen = new Set(), keys = [...A.keys()], ends = keys.filter(k => A.get(k).length === 1);
+    for (const s of ends.concat(keys)) {
+      if (seen.has(s)) continue;
+      const path = [s]; seen.add(s); let cur = s;
+      for (;;) {
+        let nxt = null;
+        for (const n of A.get(cur)) if (!seen.has(n)) { nxt = n; break; }
+        if (nxt === null) break;
+        path.push(nxt); seen.add(nxt); cur = nxt;
+      }
+      if (path.length < 2) continue;
+      const p = path.map(k => pts[li].get(k));
+      if (path.length > 2 && A.get(cur).includes(s)) p.push(p[0]);
+      out.push({v: B[li], pts: p});
+    }
+  }
+  return out;
+}
+
+/* wind: arrows (envimet_wind_vectors) or 2D streamlines (envimet_wind3d, _plane_) */
+function prepWind(D, u) {
+  const W = D.wind, {na, nb, ea, eb} = D, ca = centers(ea), cb = centers(eb), h = D.ds.h;
+  const out = {mode: u.wind};
+  if (u.wind === 'arrows') {
+    const step = u.aStep, vstep = D.axis === 'z' ? step : 1, sm = [];
+    let vref = 0;
+    for (let b = 0; b < nb; b += vstep) for (let a = 0; a < na; a += step) {
+      const q = b * na + a; if (W.wf[q]) continue;
+      const hc = W.hc[q], vc = W.vc[q], s = Math.hypot(hc, vc);
+      const wa = ea[a + 1] - ea[a], wb = eb[b + 1] - eb[b];
+      const cell = D.axis === 'z' ? Math.min(wa, wb) * step : Math.min(wa * step, wb);
+      sm.push([ca[a], cb[b], hc, vc, s, cell]);
+      if (s > vref) vref = s;
+    }
+    out.samples = sm;
+    out.vref = u.aVref > 0 ? u.aVref : (vref > 1e-9 ? vref : 1);
+  } else {
+    const locA = makeLoc(ca), locB = makeLoc(cb);
+    const velAt = (x, y) => {
+      const ra = locA(x); if (!ra) return null;
+      const rb = locB(y); if (!rb) return null;
+      const [a, ta] = ra, [b, tb] = rb, q = b * na + a;
+      const qs = [q, q + 1, q + na, q + na + 1];
+      const ws = [(1 - ta) * (1 - tb), ta * (1 - tb), (1 - ta) * tb, ta * tb];
+      let hx = 0, vy = 0;
+      for (let n = 0; n < 4; n++) {
+        if (ws[n] > 0) { if (W.wf[qs[n]]) return null; hx += ws[n] * W.hc[qs[n]]; vy += ws[n] * W.vc[qs[n]]; }
+      }
+      return [hx, vy];
+    };
+    const sa = u.seed, sb = D.axis === 'z' ? sa : Math.max(1, (sa / 4) | 0);
+    const cell = Math.min(Math.min(...h.dx), Math.min(...h.dy)), ds = 0.75 * cell;
+    const nmax = Math.floor(200 / ds), vmin = 0.05, lines = [];
+    for (let b = 0; b < nb; b += sb) for (let a = 0; a < na; a += sa) {
+      let x = ca[a], y = cb[b], vel = velAt(x, y);
+      if (!vel) continue;
+      const line = [[x, y]];
+      let s = Math.hypot(vel[0], vel[1]);
+      const sp = [s];
+      for (let n = 0; n < nmax; n++) {                     // arc-length RK2
+        if (s < vmin) break;
+        let hh = 0.5 * ds / s;
+        const vm = velAt(x + vel[0] * hh, y + vel[1] * hh);
+        if (!vm) break;
+        const smid = Math.hypot(vm[0], vm[1]);
+        if (smid < vmin) break;
+        hh = ds / smid; x += vm[0] * hh; y += vm[1] * hh;
+        vel = velAt(x, y);
+        if (!vel) break;
+        line.push([x, y]); s = Math.hypot(vel[0], vel[1]); sp.push(s);
+      }
+      if (line.length >= 3) lines.push({pts: line, sp});
+    }
+    out.lines = lines;
+    let smin = Infinity, smax = 0;
+    for (const l of lines) for (const v of l.sp) { if (v < smin) smin = v; if (v > smax) smax = v; }
+    out.smin = isFinite(smin) ? smin : 0; out.smax = smax;
+  }
+  if (u.wind === 'arrows') {
+    let smin = Infinity, smax = 0;
+    for (const s of out.samples) { if (s[4] < smin) smin = s[4]; if (s[4] > smax) smax = s[4]; }
+    out.smin = isFinite(smin) ? smin : 0; out.smax = smax;
+  }
+  // colour range of the speed gradient: 0 .. ref speed, or slice min .. max
+  out.cmin = u.aVref > 0 ? 0 : out.smin;
+  out.cmax = u.aVref > 0 ? u.aVref : Math.max(out.smax, out.cmin + 1e-6);
+  out.lut = makeLut(getPal(u.wPal, u.wPalRev));
+  out.byspeed = u.wColMode === 'speed';
+  return out;
+}
+
+/* ---------------------------------------------------------------- view */
+function stageSize() { const r = $('stage').getBoundingClientRect(); return [Math.max(50, r.width), Math.max(50, r.height)]; }
+function fit() {
+  const D = S.data; if (!D) return;
+  const [W, H] = stageSize();
+  const legW = Math.min(250, W * 0.32);
+  const wa = D.ea[D.na] - D.ea[0], wb = D.eb[D.nb] - D.eb[0];
+  const aw = Math.max(40, W - legW - 40), ah = Math.max(40, H - 80);
+  const s = Math.min(aw / wa, ah / wb);
+  S.view = {s, ox: 20 + (aw - wa * s) / 2 - D.ea[0] * s, oy: 20 + (ah + wb * s) / 2 + D.eb[0] * s};
+}
+let pend = false;
+function schedule() { if (pend) return; pend = true; requestAnimationFrame(() => { pend = false; draw(); }); }
+function draw() {
+  const [W, H] = stageSize(), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const t0 = performance.now();
+  if (T3.on) update3d();
+  else render(cv.getContext('2d'), W, H, dpr);
+  S.ms = performance.now() - t0;
+  const D = S.data, F = S.F;
+  if (!D) return;
+  const ds = D.ds, h = ds.h;
+  if (F && !F.valid) { status('No valid data on this slice (only buildings / no data).', true); return; }
+  status(`${ds.name}${D.diff ? '  −  ' + D.diff.name : ''} · ${h.nx}×${h.ny}×${h.nz} cells · ` +
+         `${[h.date, h.time].filter(Boolean).join(' ') || 'date/time not found'} · ${S.ms.toFixed(0)} ms` +
+         (ds.warn ? ' · ' + ds.warn : '') + (ui().wind !== 'off' && !windIdx(h) ? ' · no wind data in this file' : ''));
+}
+
+/* ---------------------------------------------------------------- render */
+/* opts.view = custom view (3D texture), opts.texture = map only (no legend / title / frame) */
+function render(ctx, W, H, dpr, opts) {
+  opts = opts || {};
+  const PW = Math.round(W * dpr), PH = Math.round(H * dpr);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, PW, PH);
+  const D = S.data, F = S.F, V = opts.view || S.view;
+  if (!D || !F || !V || !F.valid) return;
+  const u = ui(), {na, nb, ea, eb} = D, NA = na + 1;
+
+  // ---- raster: per-pixel lookup of cell + position inside the cell
+  const colA = new Int32Array(PW), colS = new Float32Array(PW), rowB = new Int32Array(PH), rowT = new Float32Array(PH);
+  for (let x = 0; x < PW; x++) {
+    const w = ((x + 0.5) / dpr - V.ox) / V.s, a = locEdge(ea, w);
+    colA[x] = a; colS[x] = a < 0 ? 0 : (w - ea[a]) / (ea[a + 1] - ea[a]);
+  }
+  for (let y = 0; y < PH; y++) {
+    const w = (V.oy - (y + 0.5) / dpr) / V.s, b = locEdge(eb, w);
+    rowB[y] = b; rowT[y] = b < 0 ? 0 : (w - eb[b]) / (eb[b + 1] - eb[b]);
+  }
+  const img = ctx.createImageData(PW, PH), d = img.data;
+  d.fill(255);
+  const bc = hexRGB(u.bld), mode = F.mode, filled = F.filled, vals = D.vals, node = F.node, lut = F.lut;
+  const vmin = F.vmin, span = F.span, isBand = mode === 'contour' || mode === 'utci', band = F.band, bandCol = F.bandCol;
+  for (let y = 0; y < PH; y++) {
+    const b = rowB[y]; if (b < 0) continue;
+    const t = rowT[y], rq = b * na, rn = b * NA;
+    let o = y * PW * 4;
+    for (let x = 0; x < PW; x++, o += 4) {
+      const a = colA[x]; if (a < 0) continue;
+      const q = rq + a; let c;
+      if (filled[q]) c = bc;
+      else if (mode === 'cells') { const s = Math.round((vals[q] - vmin) * span); c = lut[s < 0 ? 0 : s > 255 ? 255 : s]; }
+      else {
+        const s = colS[x], n0 = rn + a;
+        const v0 = node[n0], v1 = node[n0 + 1], v3 = node[n0 + NA], v2 = node[n0 + NA + 1];
+        const v = s >= t ? v0 + s * (v1 - v0) + t * (v2 - v1) : v0 + t * (v3 - v0) + s * (v2 - v3);
+        if (isBand) c = bandCol[band(v)];
+        else { const si = Math.round((v - vmin) * span); c = lut[si < 0 ? 0 : si > 255 ? 255 : si]; }
+      }
+      d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2];
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  // ---- vector overlays in CSS pixels
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const X = w => V.ox + w * V.s, Y = w => V.oy - w * V.s;
+  if (!opts.texture) {
+    ctx.strokeStyle = '#9aa0a8'; ctx.lineWidth = 1;
+    ctx.strokeRect(X(ea[0]), Y(eb[nb]), (ea[na] - ea[0]) * V.s, (eb[nb] - eb[0]) * V.s);
+  }
+  if (u.grid) drawGrid(ctx, W, H, X, Y, V);
+  if (F.iso && F.iso.length && u.isoShow) {
+    ctx.strokeStyle = 'rgba(25,25,25,.7)'; ctx.lineWidth = 0.8; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (const l of F.iso) { l.pts.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1]))); }
+    ctx.stroke();
+  }
+  if (F.wind) drawWind(ctx, F.wind, X, Y, V.s, u);
+  const taken = [];
+  if (u.extremes) drawExtremes(ctx, X, Y, u, taken);
+  if (F.iso && u.isoLab) drawIsoLabels(ctx, W, H, X, Y, u, taken);   // independent of the lines
+  drawProbeMarks(ctx, X, Y);
+  if (opts.texture) return;
+  drawOverlay(ctx, W, H, u);
+}
+/* legend(s) + title, shared by the 2D map and the 3D overlay */
+function drawOverlay(ctx, W, H, u) {
+  const bottom = drawLegend(ctx, W, H, u);
+  const F = S.F;
+  if (F && F.wind && F.wind.byspeed) drawWindLegend(ctx, W, bottom + 8, F.wind);
+  drawTitle(ctx, W, H, u);
+}
+function drawGrid(ctx, W, H, X, Y, V) {
+  const D = S.data, {na, nb, ea, eb} = D;
+  if (Math.min(ea[1] - ea[0], eb[1] - eb[0]) * V.s < 5) return;
+  ctx.strokeStyle = 'rgba(0,0,0,.12)'; ctx.lineWidth = 0.5; ctx.beginPath();
+  const y0 = Y(eb[nb]), y1 = Y(eb[0]), x0 = X(ea[0]), x1 = X(ea[na]);
+  for (const e of ea) { const x = X(e); if (x >= 0 && x <= W) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); } }
+  for (const e of eb) { const y = Y(e); if (y >= 0 && y <= H) { ctx.moveTo(x0, y); ctx.lineTo(x1, y); } }
+  ctx.stroke();
+}
+function cellCentre(q) {
+  const D = S.data, a = q % D.na, b = (q / D.na) | 0;
+  return [(D.ea[a] + D.ea[a + 1]) / 2, (D.eb[b] + D.eb[b + 1]) / 2];
+}
+function haloText(ctx, txt, x, y) {
+  ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,255,255,.92)'; ctx.strokeText(txt, x, y);
+  ctx.fillText(txt, x, y);
+}
+function drawExtremes(ctx, X, Y, u, taken) {
+  const F = S.F;
+  ctx.font = `600 ${Math.max(10, u.labSize)}px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  for (const [q, lab, col] of [[F.imax, 'max', '#b91c1c'], [F.imin, 'min', '#1d4ed8']]) {
+    if (q < 0) continue;
+    const [cx, cy] = cellCentre(q), x = X(cx), y = Y(cy);
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI);
+    ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke();
+    ctx.fillStyle = col; haloText(ctx, `${lab} ${fmtN(S.data.vals[q], u.dec + 1)}`, x + 7, y);
+    taken.push([x, y]);
+  }
+}
+function drawIsoLabels(ctx, W, H, X, Y, u, taken) {
+  const F = S.F, size = u.labSize, spacing = Math.max(80, size * 16);
+  const gap = Math.max(0.35 * spacing, 4 * size), gap2 = gap * gap, grid = new Map();
+  const free = (x, y) => {
+    const ki = Math.floor(x / gap), kj = Math.floor(y / gap);
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+      const arr = grid.get((ki + i) + ',' + (kj + j));
+      if (arr) for (const p of arr) if ((p[0] - x) ** 2 + (p[1] - y) ** 2 < gap2) return false;
+    }
+    const k = ki + ',' + kj; if (!grid.has(k)) grid.set(k, []); grid.get(k).push([x, y]);
+    return true;
+  };
+  for (const p of taken) free(p[0], p[1]);
+  const lines = [];
+  for (const l of F.iso) {
+    const sp = l.pts.map(p => [X(p[0]), Y(p[1])]), cum = [0];
+    for (let i = 1; i < sp.length; i++) cum.push(cum[i - 1] + Math.hypot(sp[i][0] - sp[i - 1][0], sp[i][1] - sp[i - 1][1]));
+    const L = cum[cum.length - 1];
+    if (L >= 0.3 * spacing) lines.push({L, sp, cum, v: l.v});
+  }
+  lines.sort((a, b) => b.L - a.L);
+  ctx.font = `600 ${size}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+  ctx.fillStyle = '#1f2328';
+  for (const l of lines) {
+    const txt = fmtN(l.v, u.dec), k = Math.max(1, Math.floor(l.L / spacing));
+    let i = 0;
+    for (let j = 0; j < k; j++) {
+      const sAt = (j + 0.5) * l.L / k;
+      while (i < l.cum.length - 2 && l.cum[i + 1] < sAt) i++;
+      const seg = l.cum[i + 1] - l.cum[i], t = seg > 1e-9 ? (sAt - l.cum[i]) / seg : 0;
+      const p = l.sp[i], q = l.sp[i + 1], x = p[0] + (q[0] - p[0]) * t, y = p[1] + (q[1] - p[1]) * t;
+      if (x < 0 || y < 0 || x > W || y > H) continue;
+      let ang = u.isoHoriz ? 0 : Math.atan2(q[1] - p[1], q[0] - p[0]);
+      if (ang > Math.PI / 2) ang -= Math.PI; else if (ang < -Math.PI / 2) ang += Math.PI;   // keep readable
+      if (!free(x, y)) continue;
+      ctx.save(); ctx.translate(x, y); ctx.rotate(ang); haloText(ctx, txt, 0, 0); ctx.restore();
+    }
+  }
+}
+function drawWind(ctx, w, X, Y, s, u) {
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const col = sp => w.byspeed ? windColor(w, sp) : u.wCol;
+  const lw = u.wWidth;
+  const head = (x, y, dx, dy, hl, c) => {
+    ctx.fillStyle = c;
+    ctx.beginPath(); ctx.moveTo(x, y);
+    ctx.lineTo(x - dx * hl - dy * hl * 0.45, y - dy * hl + dx * hl * 0.45);
+    ctx.lineTo(x - dx * hl + dy * hl * 0.45, y - dy * hl - dx * hl * 0.45);
+    ctx.closePath(); ctx.fill();
+  };
+  if (w.mode === 'arrows') {
+    for (const [cx, cy, hc, vc, sp, cell] of w.samples) {
+      if (sp < 1e-6) continue;
+      const L = 0.9 * cell * u.aScale * Math.min(sp / w.vref, 1.5) * s;
+      if (L < 1.5) continue;
+      const dx = hc / sp, dy = -vc / sp, x = X(cx), y = Y(cy);
+      const tx = x - dx * L / 2, ty = y - dy * L / 2, hx = x + dx * L / 2, hy = y + dy * L / 2;
+      const hl = Math.min(0.4 * L, Math.max(3, 0.18 * cell * s * u.aScale * 2)), c = col(sp);
+      ctx.strokeStyle = c; ctx.lineWidth = lw;
+      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(hx - dx * hl * 0.6, hy - dy * hl * 0.6); ctx.stroke();
+      head(hx, hy, dx, dy, hl, c);
+    }
+    return;
+  }
+  // ---- streamlines
+  if (w.byspeed) {                                    // light halo keeps the gradient readable
+    ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = lw + 1.6;
+    ctx.beginPath();
+    for (const l of w.lines) l.pts.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])));
+    ctx.stroke();
+  }
+  ctx.lineWidth = lw;
+  for (const l of w.lines) {
+    const P = l.pts, sp = l.sp;
+    if (!w.byspeed) {
+      ctx.strokeStyle = u.wCol; ctx.beginPath();
+      P.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])));
+      ctx.stroke();
+    } else {                                          // one stroke per run of equal colour bucket
+      let cur = null;
+      ctx.beginPath(); ctx.moveTo(X(P[0][0]), Y(P[0][1]));
+      for (let i = 1; i < P.length; i++) {
+        const c = col(0.5 * (sp[i - 1] + sp[i]));
+        if (cur !== null && c !== cur) {
+          ctx.strokeStyle = cur; ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(X(P[i - 1][0]), Y(P[i - 1][1]));
+        }
+        cur = c; ctx.lineTo(X(P[i][0]), Y(P[i][1]));
+      }
+      if (cur !== null) { ctx.strokeStyle = cur; ctx.stroke(); }
+    }
+    const m = P.length >> 1, p = P[m - 1], q = P[m];
+    const dx = X(q[0]) - X(p[0]), dy = Y(q[1]) - Y(p[1]), l2 = Math.hypot(dx, dy);
+    if (l2 > 1e-6) head(X(q[0]), Y(q[1]), dx / l2, dy / l2, 4 + 2 * lw, col(sp[m]));
+  }
+}
+function probeOnSlice(p) {
+  const D = S.data, h = D.ds.h;
+  if (D.axis === 'z') return p.k === D.k ? [h.xc[p.i], h.yc[p.j]] : null;
+  if (D.axis === 'x') return p.i === D.k ? [h.yc[p.j], h.zc[p.k]] : null;
+  return p.j === D.k ? [h.xc[p.i], h.zc[p.k]] : null;
+}
+function drawProbeMarks(ctx, X, Y) {
+  ctx.font = `700 11px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  for (const p of S.probes) {
+    const c = probeOnSlice(p); if (!c) continue;
+    const x = X(c[0]), y = Y(c[1]);
+    ctx.beginPath(); ctx.arc(x, y, 4.5, 0, 2 * Math.PI);
+    ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#111'; ctx.stroke();
+    ctx.fillStyle = '#111'; haloText(ctx, 'P' + p.id, x + 7, y - 7);
+  }
+}
+function planeText(D) {
+  const h = D.ds.h, k = D.k;
+  return D.axis === 'z' ? `Plan · z = ${fmtN(h.zc[k], 2)} m (k ${k})` :
+         D.axis === 'x' ? `Section YZ · x = ${fmtN(h.xc[k], 1)} m (i ${k})` : `Section XZ · y = ${fmtN(h.yc[k], 1)} m (j ${k})`;
+}
+function drawLegend(ctx, W, H, u) {
+  const D = S.data, F = S.F, h = D.ds.h, name = h.vars[D.vi], unit = unitOf(name), dec = u.dec;
+  const head = [];
+  wrap(D.diff ? 'Δ ' + name : name, 30).forEach(t => head.push({t, b: true}));
+  if (D.diff) head.push({t: `${D.ds.label}  −  ${D.diff.label}`});
+  else if (h.date || h.time) head.push({t: [h.date, h.time].filter(Boolean).join('  ')});
+  head.push({t: planeText(D)});
+  head.push({t: `Min: ${fmtN(F.dmin, 2)} ${unit}`.trim()}, {t: `Max: ${fmtN(F.dmax, 2)} ${unit}`.trim()});
+
+  const fs = 12, lh = 16, pad = 10, bw = 14;
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  const tw = (t, b) => { ctx.font = `${b ? 600 : 400} ${fs}px ${FONT}`; return ctx.measureText(t).width; };
+  let maxW = Math.max(...head.map(l => tw(l.t, l.b)));
+
+  // ---- entries
+  let ticks = [], classes = [], bh = 0;
+  if (F.mode === 'utci') {
+    for (const c of UTCI) {
+      if (c.hi <= F.dmin || c.lo > F.dmax) continue;
+      const r = c.lo === -Infinity ? `< ${c.hi}` : c.hi === Infinity ? `≥ ${c.lo}` : `${c.lo} – ${c.hi}`;
+      classes.push({c: c.c, t: `${c.name}  (${r} °C)`});
+    }
+    classes.reverse();                                        // hot on top
+    maxW = Math.max(maxW, ...classes.map(c => 22 + tw(c.t)));
+    bh = classes.length * 18;
+  } else {
+    const contour = F.mode === 'contour';
+    const n = contour ? F.bounds.length : u.legN;
+    const val = i => contour ? F.bounds[i] : F.vmin + (F.vmax - F.vmin) * i / (n - 1);
+    const tol = 1e-9 * (F.vmax - F.vmin);
+    if (u.rangeLab) {
+      for (let i = 0; i < n - 1; i++) {
+        const a = val(i), b = val(i + 1);
+        let t = `${fmtN(a, dec)} – ${fmtN(b, dec)}`;
+        if (i === 0 && F.dmin < F.vmin - tol) t = '< ' + fmtN(b, dec);
+        if (i === n - 2 && F.dmax > F.vmax + tol) t = '≥ ' + fmtN(a, dec);
+        ticks.push({f: (i + 0.5) / (n - 1), t});
+      }
+    } else for (let i = 0; i < n; i++) ticks.push({f: i / (n - 1), t: fmtN(val(i), dec)});
+    maxW = Math.max(maxW, bw + 8 + Math.max(...ticks.map(t => tw(t.t))));
+    bh = Math.min(Math.max(140, H * 0.4), 320);
+    bh = Math.max(bh, ticks.length * 15);
+  }
+  const boxW = maxW + 2 * pad, boxH = pad + head.length * lh + 10 + bh + pad + 6;
+  const x0 = W - boxW - 12, y0 = 12;
+  ctx.fillStyle = 'rgba(255,255,255,.93)'; ctx.strokeStyle = '#dde0e5'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x0, y0, boxW, boxH, 6) : ctx.rect(x0, y0, boxW, boxH); ctx.fill(); ctx.stroke();
+  let y = y0 + pad + lh / 2;
+  head.forEach((l, i) => {
+    ctx.font = `${l.b ? 600 : 400} ${fs}px ${FONT}`; ctx.fillStyle = l.b ? '#111' : '#444';
+    ctx.fillText(l.t, x0 + pad, y); y += lh;
+    if (l.b && (!head[i + 1] || !head[i + 1].b)) { /* end of name block */ }
+  });
+  y += 4;
+  const top = y + 3, bx = x0 + pad;
+  ctx.font = `400 ${fs}px ${FONT}`;
+  if (F.mode === 'utci') {
+    classes.forEach((c, i) => {
+      const yy = top + i * 18;
+      ctx.fillStyle = `rgb(${c.c})`; ctx.fillRect(bx, yy + 2, 16, 13);
+      ctx.strokeStyle = 'rgba(0,0,0,.25)'; ctx.strokeRect(bx + .5, yy + 2.5, 15, 12);
+      ctx.fillStyle = '#222'; ctx.fillText(c.t, bx + 22, yy + 9);
+    });
+    return y0 + boxH;
+  }
+  if (F.mode === 'contour') {
+    const L = F.bandCol.length;
+    for (let i = 0; i < L; i++) {
+      ctx.fillStyle = `rgb(${F.bandCol[i]})`;
+      ctx.fillRect(bx, top + bh * (1 - (i + 1) / L), bw, bh / L + 0.5);
+    }
+  } else {
+    const n = 64;
+    for (let i = 0; i < n; i++) { ctx.fillStyle = `rgb(${F.lut[Math.round(i / (n - 1) * 255)]})`; ctx.fillRect(bx, top + bh * (1 - (i + 1) / n), bw, bh / n + 0.5); }
+  }
+  ctx.strokeStyle = 'rgba(0,0,0,.3)'; ctx.strokeRect(bx + .5, top + .5, bw - 1, bh - 1);
+  ctx.fillStyle = '#222';
+  for (const t of ticks) {
+    const yy = top + bh * (1 - t.f);
+    ctx.fillRect(bx + bw, yy - 0.5, 3, 1);
+    ctx.fillText(t.t, bx + bw + 7, yy);
+  }
+  return y0 + boxH;
+}
+/* compact horizontal legend of the wind-speed gradient, under the main legend */
+function drawWindLegend(ctx, W, y0, w) {
+  const pad = 10, bw = 170, bh = 10, fs = 12, n = 5;
+  const boxW = bw + 2 * pad + 10, boxH = pad + 16 + bh + 20 + pad - 4;
+  const x0 = W - boxW - 12;
+  ctx.fillStyle = 'rgba(255,255,255,.93)'; ctx.strokeStyle = '#dde0e5'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x0, y0, boxW, boxH, 6) : ctx.rect(x0, y0, boxW, boxH); ctx.fill(); ctx.stroke();
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  ctx.font = `600 ${fs}px ${FONT}`; ctx.fillStyle = '#111';
+  ctx.fillText(`Wind speed (m/s)${w.mode === 'streamlines' ? ' · in-plane' : ''}`, x0 + pad, y0 + pad + 6);
+  const bx = x0 + pad + 5, by = y0 + pad + 16;
+  for (let i = 0; i < 64; i++) {
+    ctx.fillStyle = `rgb(${w.lut[Math.round(i / 63 * 255)]})`;
+    ctx.fillRect(bx + bw * i / 64, by, bw / 64 + 0.5, bh);
+  }
+  ctx.strokeStyle = 'rgba(0,0,0,.3)'; ctx.strokeRect(bx + .5, by + .5, bw - 1, bh - 1);
+  ctx.font = `400 11px ${FONT}`; ctx.fillStyle = '#222'; ctx.textAlign = 'center';
+  for (let i = 0; i < n; i++) {
+    const x = bx + bw * i / (n - 1);
+    ctx.fillRect(x - 0.5, by + bh, 1, 3);
+    ctx.fillText(fmtN(w.cmin + (w.cmax - w.cmin) * i / (n - 1), 2), x, by + bh + 11);
+  }
+  ctx.textAlign = 'left';
+}
+function windColor(w, s) {
+  const i = Math.round((s - w.cmin) / (w.cmax - w.cmin) * 255);
+  const c = w.lut[i < 0 ? 0 : i > 255 ? 255 : i];
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+function drawTitle(ctx, W, H, u) {
+  const lines = u.title.replace(/\r/g, '').split('\n').filter(l => l.trim());
+  if (!lines.length) return;
+  const fs = 15, lh = 20;
+  ctx.font = `600 ${fs}px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + 20, h = lines.length * lh + 10;
+  const x = 12, y = H - h - 12;
+  ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#111';
+  lines.forEach((l, i) => ctx.fillText(l, x + 10, y + 5 + lh * (i + 0.5)));
+}
+
+/* ====================================================================================
+   probes (envimet_point_probe)
+   ==================================================================================== */
+async function ensureProbe(p, ds) {
+  if (p.vals.has(ds.key)) return;
+  const h = ds.h;
+  if (p.i >= h.nx || p.j >= h.ny || p.k >= h.nz) { p.vals.set(ds.key, null); return; }
+  const n2 = h.nx * h.ny, n3 = n2 * h.nz, off = p.k * n2 + p.j * h.nx + p.i;
+  const out = await Promise.all(h.vars.map((_, vi) => readF32(ds.edt, vi * n3 + off, 1).then(a => a[0] > LIM ? a[0] : null)));
+  p.vals.set(ds.key, out);
+}
+async function syncProbes() {
+  const D = S.data; if (!D || !S.probes.length) { renderProbes(); return; }
+  try {
+    await Promise.all(S.probes.map(p => ensureProbe(p, D.ds)));
+    if (D.diff) await Promise.all(S.probes.map(p => ensureProbe(p, D.diff)));
+  } catch (e) { status(e.message, true); }
+  renderProbes();
+}
+function probeVal(p, ds, name) {
+  const arr = p.vals.get(ds.key); if (!arr) return null;
+  const vi = ds.h.vars.findIndex(n => norm(n) === norm(name));
+  return vi < 0 ? null : arr[vi];
+}
+function renderProbes() {
+  const box = $('probes'), has = S.probes.length > 0;
+  for (const b of ['probeCsvBtn', 'probeAllBtn', 'probeClrBtn']) $(b).disabled = !has;
+  if (!has || !S.data) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  const D = S.data, name = D.ds.h.vars[D.vi], unit = unitOf(name), dec = ui().dec + 1;
+  $('pHead').innerHTML = `<tr><th>Point</th><th>i</th><th>j</th><th>k</th><th>x (m)</th><th>y (m)</th><th>z (m)</th>` +
+    `<th>${esc(shortName(name))}${unit ? ' [' + esc(unit) + ']' : ''}${D.diff ? ' · A' : ''}</th>` +
+    (D.diff ? '<th>B</th><th>Δ A−B</th>' : '') + '<th></th></tr>';
+  $('pBody').innerHTML = S.probes.map(p => {
+    const a = probeVal(p, D.ds, name), b = D.diff ? probeVal(p, D.diff, name) : null;
+    return `<tr><td>P${p.id}</td><td>${p.i}</td><td>${p.j}</td><td>${p.k}</td><td>${fmtN(p.x, 2)}</td><td>${fmtN(p.y, 2)}</td><td>${fmtN(p.z, 2)}</td>` +
+      `<td>${a === null ? 'no data' : fmtN(a, dec)}</td>` +
+      (D.diff ? `<td>${b === null ? 'no data' : fmtN(b, dec)}</td><td>${a === null || b === null ? '–' : fmtN(a - b, dec)}</td>` : '') +
+      `<td><button data-del="${p.id}" title="Remove">×</button></td></tr>`;
+  }).join('');
+}
+async function addProbe(a, b) {
+  const D = S.data, h = D.ds.h, [i, j, k] = cellIJK(D.axis, D.k, a, b);
+  if (S.probes.some(p => p.i === i && p.j === j && p.k === k)) return;
+  S.probes.push({id: S.nextProbe++, i, j, k, x: h.xc[i], y: h.yc[j], z: h.zc[k], vals: new Map()});
+  draw();
+  await syncProbes();
+}
+
+/* ====================================================================================
+   exports
+   ==================================================================================== */
+function fileBase() {
+  const D = S.data, n = shortName(D.ds.h.vars[D.vi]).replace(/[^A-Za-z0-9]+/g, '_');
+  return `${D.ds.name}${D.diff ? '_minus_' + D.diff.name : ''}_${n}_${D.axis}${D.k}`;
+}
+function exportPNG() {
+  if (!S.data) return;
+  const [W, H] = stageSize(), sc = +$('pngScale').value, c = document.createElement('canvas');
+  c.width = Math.round(W * sc); c.height = Math.round(H * sc);
+  if (T3.on && T3.renderer) {                       // 3D: WebGL frame + legend overlay
+    render3dFrame(sc);
+    const ctx = c.getContext('2d');
+    ctx.drawImage(T3.renderer.domElement, 0, 0, c.width, c.height);
+    ctx.drawImage($('ov3d'), 0, 0, c.width, c.height);
+    render3dFrame();
+    c.toBlob(b => download(b, fileBase() + '_3d.png'), 'image/png');
+    return;
+  }
+  render(c.getContext('2d'), W, H, sc);
+  c.toBlob(b => download(b, fileBase() + '.png'), 'image/png');
+}
+
+/* ====================================================================================
+   3D view (three.js from cdnjs, loaded on first use)
+   ENVI-met (x, y, z) -> three.js (x - cx, z * exaggeration, -(y - cy)), domain centred
+   ==================================================================================== */
+const T3 = {on: false, ready: null, renderer: null, scene: null, cam: null, bld: null, bldKey: '',
+            slice: null, frame: null, frameKey: '', orb: null, tok: 0, fitted: '', cx: 0, cy: 0};
+function loadThree() {
+  if (window.THREE) return Promise.resolve(window.THREE);
+  if (T3.ready) return T3.ready;
+  T3.ready = new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+    s.onload = () => res(window.THREE);
+    s.onerror = () => { T3.ready = null; rej(new Error('Could not load three.js – the 3D view needs an internet connection the first time.')); };
+    document.head.appendChild(s);
+  });
+  return T3.ready;
+}
+function init3d() {
+  const THREE = window.THREE, host = $('gl3d');
+  const r = new THREE.WebGLRenderer({antialias: true, preserveDrawingBuffer: true});
+  r.setClearColor(0xffffff, 1);
+  host.appendChild(r.domElement);
+  const scene = new THREE.Scene();
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 0.8));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.55); sun.position.set(-0.6, 1, 0.45); scene.add(sun);
+  T3.renderer = r; T3.scene = scene;
+  T3.cam = new THREE.PerspectiveCamera(35, 1, 0.5, 50000);
+  T3.orb = {theta: -0.55, phi: 0.62, r: 300, target: new THREE.Vector3()};
+  // ---- orbit / pan / zoom
+  let d = null;
+  host.addEventListener('contextmenu', e => e.preventDefault());
+  host.addEventListener('pointerdown', e => {
+    host.setPointerCapture(e.pointerId); host.style.cursor = 'grabbing';
+    d = {x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey};
+  });
+  host.addEventListener('pointermove', e => {
+    if (!d) return;
+    const dx = e.clientX - d.x, dy = e.clientY - d.y, o = T3.orb;
+    d.x = e.clientX; d.y = e.clientY;
+    if (d.pan) {
+      const k = o.r * 0.0016, m = T3.cam.matrix;
+      o.target.addScaledVector(new THREE.Vector3().setFromMatrixColumn(m, 0), -dx * k);
+      o.target.addScaledVector(new THREE.Vector3().setFromMatrixColumn(m, 1), dy * k);
+    } else {
+      o.theta -= dx * 0.008;
+      o.phi = Math.min(1.55, Math.max(0.05, o.phi + dy * 0.008));
+    }
+    render3dFrame();
+  });
+  const up = () => { d = null; host.style.cursor = 'grab'; };
+  host.addEventListener('pointerup', up); host.addEventListener('pointercancel', up);
+  host.addEventListener('wheel', e => {
+    e.preventDefault();
+    T3.orb.r = Math.min(20000, Math.max(5, T3.orb.r * Math.exp(e.deltaY * (e.deltaMode ? 0.05 : 0.0012))));
+    render3dFrame();
+  }, {passive: false});
+}
+function dispose3(obj) {
+  if (!obj) return;
+  T3.scene.remove(obj);
+  obj.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); }
+  });
+}
+/* buildings: surface of the no-data voxels (-999) of the current variable */
+function buildingMesh(ds, blk, zs) {
+  const THREE = window.THREE, h = ds.h, {nx, ny, nz, xe, ye, ze} = h, n2 = nx * ny;
+  // a level without ANY valid value is "not stored" (e.g. BIO-met files keep only one height,
+  // all other levels are -999) -> never treat it as building
+  const lvl = new Uint8Array(nz);
+  for (let k = 0; k < nz; k++) {
+    for (let q = k * n2, e = q + n2; q < e; q++) if (blk[q] > LIM) { lvl[k] = 1; break; }
+  }
+  const solid = (i, j, k) => i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz && lvl[k] === 1 &&
+                             !(blk[k * n2 + j * nx + i] > LIM);
+  const pos = [], nor = [];
+  const P = (x, y, z) => [x - T3.cx, z * zs, -(y - T3.cy)];
+  const quad = (a, b, c, d, n) => {
+    for (const p of [a, b, c, a, c, d]) { pos.push(p[0], p[1], p[2]); nor.push(n[0], n[1], n[2]); }
+  };
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    if (!solid(i, j, k)) continue;
+    const x0 = xe[i], x1 = xe[i + 1], y0 = ye[j], y1 = ye[j + 1], z0 = ze[k], z1 = ze[k + 1];
+    if (!solid(i - 1, j, k)) quad(P(x0, y0, z0), P(x0, y1, z0), P(x0, y1, z1), P(x0, y0, z1), [-1, 0, 0]);
+    if (!solid(i + 1, j, k)) quad(P(x1, y0, z0), P(x1, y0, z1), P(x1, y1, z1), P(x1, y1, z0), [1, 0, 0]);
+    if (!solid(i, j - 1, k)) quad(P(x0, y0, z0), P(x0, y0, z1), P(x1, y0, z1), P(x1, y0, z0), [0, 0, 1]);
+    if (!solid(i, j + 1, k)) quad(P(x0, y1, z0), P(x1, y1, z0), P(x1, y1, z1), P(x0, y1, z1), [0, 0, -1]);
+    if (!solid(i, j, k + 1)) quad(P(x0, y0, z1), P(x0, y1, z1), P(x1, y1, z1), P(x1, y0, z1), [0, 1, 0]);
+    if (k > 0 && !solid(i, j, k - 1)) quad(P(x0, y0, z0), P(x1, y0, z0), P(x1, y1, z0), P(x0, y1, z0), [0, -1, 0]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  const m = new THREE.MeshLambertMaterial({color: 0xd4d6da, side: THREE.DoubleSide});
+  return new THREE.Mesh(g, m);
+}
+/* the current 2D map (same renderer as the 2D view, without legend) as a texture */
+function sliceTexture() {
+  const D = S.data, wa = D.ea[D.na] - D.ea[0], wb = D.eb[D.nb] - D.eb[0];
+  const css = 1100 / Math.max(wa, wb), W = wa * css, H = wb * css, dpr = 2;
+  const c = document.createElement('canvas');
+  c.width = Math.max(2, Math.round(W * dpr)); c.height = Math.max(2, Math.round(H * dpr));
+  render(c.getContext('2d'), W, H, dpr, {texture: true, view: {s: css, ox: -D.ea[0] * css, oy: D.eb[D.nb] * css}});
+  return c;
+}
+function sliceMesh(zs) {
+  const THREE = window.THREE, D = S.data, h = D.ds.h, k = D.k;
+  const wa = D.ea[D.na] - D.ea[0], wb = D.eb[D.nb] - D.eb[0];
+  const ca = (D.ea[0] + D.ea[D.na]) / 2, cb = (D.eb[0] + D.eb[D.nb]) / 2;
+  const tex = new THREE.CanvasTexture(sliceTexture());
+  tex.anisotropy = T3.renderer.capabilities.getMaxAnisotropy();
+  const mat = new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide});
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(wa, D.axis === 'z' ? wb : wb * zs), mat);
+  if (D.axis === 'z') {                                // plan at the cell-centre height
+    m.rotation.x = -Math.PI / 2;
+    m.position.set(ca - T3.cx, h.zc[k] * zs + 0.02, -(cb - T3.cy));
+  } else if (D.axis === 'y') {                         // XZ section, faces south
+    m.position.set(ca - T3.cx, cb * zs, -(h.yc[k] - T3.cy));
+  } else {                                             // YZ section, faces east
+    m.rotation.y = Math.PI / 2;
+    m.position.set(h.xc[k] - T3.cx, cb * zs, -(ca - T3.cy));
+  }
+  return m;
+}
+function frameGroup(h, zs, showBox) {
+  const THREE = window.THREE, g = new THREE.Group();
+  const wx = h.xe[h.nx] - h.xe[0], wy = h.ye[h.ny] - h.ye[0], top = h.ze[h.nz] * zs;
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(wx, wy),
+    new THREE.MeshLambertMaterial({color: 0xeceef1, side: THREE.DoubleSide}));
+  ground.rotation.x = -Math.PI / 2; ground.position.y = -0.05;
+  g.add(ground);
+  if (showBox) {
+    const box = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(wx, top, wy)),
+      new THREE.LineBasicMaterial({color: 0xaab0b8}));
+    box.position.y = top / 2;
+    g.add(box);
+  }
+  // north arrow on the ground, outside the south-west corner
+  const s = 0.06 * Math.max(wx, wy), shp = new THREE.Shape();
+  shp.moveTo(0, s); shp.lineTo(-0.4 * s, -0.5 * s); shp.lineTo(0, -0.25 * s); shp.lineTo(0.4 * s, -0.5 * s); shp.closePath();
+  const na = new THREE.Mesh(new THREE.ShapeGeometry(shp), new THREE.MeshBasicMaterial({color: 0x333a44, side: THREE.DoubleSide}));
+  na.rotation.x = -Math.PI / 2;
+  na.position.set(-wx / 2 - 1.2 * s, 0, wy / 2 - 0.6 * s);
+  g.add(na);
+  return g;
+}
+function fit3d() {
+  const h = S.data.ds.h, zs = ui().zScale, o = T3.orb;
+  const wx = h.xe[h.nx] - h.xe[0], wy = h.ye[h.ny] - h.ye[0], top = h.ze[h.nz] * zs;
+  o.target.set(0, Math.min(top, 0.15 * Math.max(wx, wy)) * 0.3, 0);
+  o.r = 1.25 * Math.hypot(wx, wy, top) / (2 * Math.tan(T3.cam.fov * Math.PI / 360));
+  o.theta = -0.55; o.phi = 0.62;
+}
+function render3dFrame(scale) {
+  if (!T3.renderer) return;
+  const [W, H] = stageSize(), dpr = scale || window.devicePixelRatio || 1, o = T3.orb, cam = T3.cam;
+  T3.renderer.setPixelRatio(dpr);
+  T3.renderer.setSize(W, H, false);
+  cam.aspect = W / H; cam.updateProjectionMatrix();
+  cam.position.set(o.target.x + o.r * Math.cos(o.phi) * Math.sin(o.theta),
+                   o.target.y + o.r * Math.sin(o.phi),
+                   o.target.z + o.r * Math.cos(o.phi) * Math.cos(o.theta));
+  cam.lookAt(o.target); cam.updateMatrixWorld();
+  T3.renderer.render(T3.scene, cam);
+  const ov = $('ov3d');
+  ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr);
+  const ctx = ov.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+  if (S.data && S.F && S.F.valid) drawOverlay(ctx, W, H, ui());
+}
+async function update3d() {
+  if (!T3.on || !S.data || !S.F) return;
+  const tok = ++T3.tok;
+  try { await loadThree(); } catch (e) { status(e.message, true); setView(false); return; }
+  if (tok !== T3.tok || !T3.on) return;
+  if (!T3.renderer) init3d();
+  const D = S.data, u = ui(), h = D.ds.h, zs = u.zScale;
+  T3.cx = (h.xe[0] + h.xe[h.nx]) / 2; T3.cy = (h.ye[0] + h.ye[h.ny]) / 2;
+  // buildings (rebuilt only when dataset / variable / exaggeration changes)
+  // source of the building mask: an atmosphere file (Flow u) on the same grid if one is loaded,
+  // otherwise the current variable
+  const same = d => d.h.nx === h.nx && d.h.ny === h.ny && d.h.nz === h.nz;
+  const atmo = [D.ds].concat(S.sets.filter(d => d !== D.ds)).find(d => same(d) && windIdx(d.h));
+  const src = atmo ? {ds: atmo, vi: windIdx(atmo.h)[0]} : {ds: D.ds, vi: D.vi};
+  const bkey = [src.ds.key, src.vi, zs].join('|');
+  if (T3.bldKey !== bkey) {
+    let blk;
+    try { blk = await varBlock(src.ds, src.vi); } catch (e) { status(e.message, true); return; }
+    if (tok !== T3.tok) return;
+    dispose3(T3.bld);
+    T3.bld = buildingMesh(src.ds, blk, zs); T3.scene.add(T3.bld); T3.bldKey = bkey;
+  }
+  T3.bld.visible = u.bld3d;
+  T3.bld.material.opacity = u.bldOp; T3.bld.material.transparent = u.bldOp < 0.99;
+  T3.bld.material.depthWrite = u.bldOp >= 0.99; T3.bld.renderOrder = 2;
+  // ground / box / north arrow
+  const fkey = [h.nx, h.ny, h.nz, h.xe[h.nx], h.ye[h.ny], h.ze[h.nz], zs, u.box3d].join('|');
+  if (T3.frameKey !== fkey) { dispose3(T3.frame); T3.frame = frameGroup(h, zs, u.box3d); T3.scene.add(T3.frame); T3.frameKey = fkey; }
+  // slice (always rebuilt: it carries the current colours / isolines / wind)
+  dispose3(T3.slice);
+  T3.slice = sliceMesh(zs); T3.slice.renderOrder = 1; T3.scene.add(T3.slice);
+  const fitKey = [h.nx, h.ny, h.nz, zs].join('|');
+  if (T3.fitted !== fitKey) { fit3d(); T3.fitted = fitKey; }
+  render3dFrame();
+}
+function setView(on) {
+  T3.on = on;
+  $('v2d').classList.toggle('on', !on); $('v3d').classList.toggle('on', on);
+  cv.style.display = on ? 'none' : '';
+  $('gl3d').style.display = on ? 'block' : 'none';
+  $('ov3d').style.display = on ? 'block' : 'none';
+  $('tip').style.display = 'none';
+  if (on) { status('Loading 3D view…'); update3d(); } else draw();
+}
+function exportSliceCSV() {
+  const D = S.data, F = S.F; if (!D || !F) return;
+  const h = D.ds.h, name = h.vars[D.vi];
+  const rows = [['a', 'b', 'i', 'j', 'k', 'x', 'y', 'z', (D.diff ? 'delta ' : '') + name, 'no_data'].map(csvCell).join(',')];
+  for (let b = 0; b < D.nb; b++) for (let a = 0; a < D.na; a++) {
+    const q = b * D.na + a, [i, j, k] = cellIJK(D.axis, D.k, a, b);
+    rows.push([a, b, i, j, k, h.xc[i].toFixed(3), h.yc[j].toFixed(3), h.zc[k].toFixed(3),
+               F.filled[q] ? '' : D.vals[q], F.filled[q] ? 1 : 0].join(','));
+  }
+  download(new Blob(['\ufeff' + rows.join('\n')], {type: 'text/csv'}), fileBase() + '.csv');
+}
+async function exportProbes(all) {
+  if (!S.probes.length || !S.data) return;
+  const sets = all ? S.sets : [S.data.ds];
+  status('Reading probe values…');
+  try { for (const ds of sets) await Promise.all(S.probes.map(p => ensureProbe(p, ds))); }
+  catch (e) { status(e.message, true); return; }
+  let rows;
+  if (!all) {                                         // wide: one row per point
+    const ds = sets[0];
+    rows = [['point', 'i', 'j', 'k', 'x', 'y', 'z'].concat(ds.h.vars).map(csvCell).join(',')];
+    for (const p of S.probes) {
+      const v = p.vals.get(ds.key) || [];
+      rows.push(['P' + p.id, p.i, p.j, p.k, p.x.toFixed(3), p.y.toFixed(3), p.z.toFixed(3)]
+        .concat(ds.h.vars.map((_, i) => v[i] === null || v[i] === undefined ? '' : v[i])).join(','));
+    }
+  } else {                                            // long: dataset x point x variable
+    rows = ['dataset,date,time,point,i,j,k,x,y,z,variable,value'];
+    for (const ds of sets) for (const p of S.probes) {
+      const v = p.vals.get(ds.key); if (!v) continue;
+      ds.h.vars.forEach((n, i) => rows.push([ds.name, ds.h.date || '', ds.h.time || '', 'P' + p.id, p.i, p.j, p.k,
+        p.x.toFixed(3), p.y.toFixed(3), p.z.toFixed(3), n, v[i] === null ? '' : v[i]].map(csvCell).join(',')));
+    }
+  }
+  download(new Blob(['\ufeff' + rows.join('\n')], {type: 'text/csv'}),
+           all ? 'meerkat_probes_all_datasets.csv' : `${sets[0].name}_probes.csv`);
+  draw();
+}
+
+/* ====================================================================================
+   interaction
+   ==================================================================================== */
+function cellAt(mx, my) {
+  const D = S.data, V = S.view; if (!D || !V) return null;
+  const a = locEdge(D.ea, (mx - V.ox) / V.s), b = locEdge(D.eb, (V.oy - my) / V.s);
+  return a < 0 || b < 0 ? null : {a, b};
+}
+function showTip(e, mx, my) {
+  const tip = $('tip'), c = cellAt(mx, my), D = S.data;
+  if (!c || !S.F || !S.F.valid) { tip.style.display = 'none'; return; }
+  const q = c.b * D.na + c.a, h = D.ds.h, name = h.vars[D.vi], unit = unitOf(name), [i, j, k] = cellIJK(D.axis, D.k, c.a, c.b);
+  const v = S.F.filled[q] ? 'building / no data' : `${fmtN(D.vals[q], ui().dec + 2)} ${unit}`.trim();
+  tip.textContent = `${D.diff ? 'Δ ' : ''}${shortName(name)}: ${v}\ni ${i} · j ${j} · k ${k}\n` +
+                    `x ${fmtN(h.xc[i], 1)} · y ${fmtN(h.yc[j], 1)} · z ${fmtN(h.zc[k], 2)} m`;
+  tip.style.display = 'block';
+  const r = $('stage').getBoundingClientRect(), tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(mx + 14, r.width - tw - 4) + 'px';
+  tip.style.top = Math.min(my + 14, r.height - th - 4) + 'px';
+}
+let drag = null;
+cv.addEventListener('pointerdown', e => {
+  if (!S.view) return;
+  cv.setPointerCapture(e.pointerId);
+  drag = {x: e.clientX, y: e.clientY, ox: S.view.ox, oy: S.view.oy, moved: false};
+});
+cv.addEventListener('pointermove', e => {
+  const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  if (drag) {
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) > 4) drag.moved = true;
+    if (drag.moved) { S.view.ox = drag.ox + dx; S.view.oy = drag.oy + dy; $('tip').style.display = 'none'; schedule(); return; }
+  }
+  showTip(e, mx, my);
+});
+cv.addEventListener('pointerup', e => {
+  const d = drag; drag = null;
+  if (!d || d.moved || !ui().clickProbe) return;
+  const r = cv.getBoundingClientRect(), c = cellAt(e.clientX - r.left, e.clientY - r.top);
+  if (c) addProbe(c.a, c.b);
+});
+cv.addEventListener('pointerleave', () => { $('tip').style.display = 'none'; });
+cv.addEventListener('wheel', e => {
+  if (!S.view) return;
+  e.preventDefault();
+  const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  const f = Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0015)), V = S.view;
+  V.ox = mx - (mx - V.ox) * f; V.oy = my - (my - V.oy) * f; V.s *= f;
+  schedule();
+}, {passive: false});
+new ResizeObserver(() => { if (!S.data) return; if (T3.on) render3dFrame(); else schedule(); }).observe($('stage'));
+
+// drag & drop
+const stage = $('stage');
+stage.addEventListener('dragover', e => { e.preventDefault(); stage.classList.add('over'); });
+stage.addEventListener('dragleave', () => stage.classList.remove('over'));
+stage.addEventListener('drop', e => { e.preventDefault(); stage.classList.remove('over'); addFiles([...e.dataTransfer.files]); });
+$('openBtn').onclick = () => $('fileIn').click();
+$('fileIn').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
+$('clearBtn').onclick = () => {
+  S.sets = []; S.pending = {}; S.curKey = null; S.data = null; S.F = null; S.view = null; S.probes = [];
+  listFiles(); fillDatasetSel(); $('cmpSel').innerHTML = ''; $('varSel').innerHTML = '';
+  for (const id of ['cmpSel', 'varSel', 'kRange', 'pngBtn', 'sliceCsvBtn']) $(id).disabled = true;
+  if (T3.on) setView(false);
+  $('drop').style.display = ''; $('viewBar').style.display = 'none'; $('kLabel').textContent = '–';
+  renderProbes(); draw(); status('No data loaded.');
+};
+$('fitBtn').onclick = () => { if (T3.on) { if (T3.renderer) { fit3d(); render3dFrame(); } } else { fit(); draw(); } };
+$('v2d').onclick = () => { if (T3.on) setView(false); };
+$('v3d').onclick = () => { if (!T3.on && S.data) setView(true); };
+
+// controls
+$('dsSel').onchange = e => { S.curKey = e.target.value; onDataset(false); };
+$('cmpSel').onchange = () => refresh(false);
+$('varSel').onchange = () => refresh(false);
+$('axisSel').onchange = () => { if (curDS()) { setSliceRange(true); refresh(true); } };
+$('kRange').oninput = () => { kLabel(); refresh(false); };
+$('windSel').onchange = () => { windHint(); refresh(false); };
+const reprocess = () => { if (S.data) { process(); draw(); } };
+for (const id of ['modeSel', 'levels', 'smooth', 'autoRange', 'palSel', 'aStep', 'aScale', 'aVref', 'seed', 'wColMode', 'wPal',
+                  'palRev', 'wPalRev', 'palCustom'])
+  $(id).addEventListener(['modeSel', 'palSel', 'autoRange', 'wColMode', 'wPal', 'palRev', 'wPalRev'].includes(id) ? 'change' : 'input', reprocess);
+// palette menus + live previews
+fillPalSel('palSel', true, 'auto'); fillPalSel('wPal', false, 'greys');
+function palPreviews() {
+  const u = ui(), diff = S.data && S.data.diff;
+  drawPalPreview('palPrev', getPal(u.pal === 'auto' ? (diff ? 'diverging' : 'ladybug') : u.pal, u.palRev));
+  drawPalPreview('wPalPrev', getPal(u.wPal, u.wPalRev));
+  $('palCustom').style.display = $('palCustom').previousElementSibling.style.display =
+    (u.pal === 'custom' || u.wPal === 'custom') ? '' : 'none';
+}
+for (const id of ['palSel', 'wPal', 'palRev', 'wPalRev', 'palCustom', 'cmpSel']) $(id).addEventListener('input', palPreviews);
+palPreviews();
+for (const id of ['isoShow', 'wWidth', 'bld3d', 'bldOp', 'zScale', 'box3d'])
+  $(id).addEventListener(id === 'wWidth' || id === 'bldOp' || id === 'zScale' ? 'input' : 'change', () => { if (S.data) schedule(); });
+for (const id of ['vmin', 'vmax']) $(id).addEventListener('input', () => { $('autoRange').checked = false; reprocess(); });
+for (const id of ['bldCol', 'isoLab', 'isoHoriz', 'extremes', 'grid', 'dec', 'legN', 'rangeLab', 'labSize', 'title', 'wCol'])
+  $(id).addEventListener('input', () => { if (S.data) { schedule(); if (id === 'dec') renderProbes(); } });
+$('pngBtn').onclick = exportPNG;
+$('sliceCsvBtn').onclick = exportSliceCSV;
+$('probeCsvBtn').onclick = () => exportProbes(false);
+$('probeAllBtn').onclick = () => exportProbes(true);
+$('probeClrBtn').onclick = () => { S.probes = []; renderProbes(); draw(); };
+$('pBody').onclick = e => {
+  const id = e.target.dataset && e.target.dataset.del;
+  if (id) { S.probes = S.probes.filter(p => p.id !== +id); renderProbes(); draw(); }
+};
+</script>
+</body>
+</html>

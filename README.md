@@ -1,0 +1,156 @@
+# Meerkat
+
+**Fast visualisation of ENVI-met results – in Grasshopper and in the browser.**
+
+Meerkat reads ENVI-met output files (`.EDX` + `.EDT`) and turns them into heatmaps, contour maps, wind arrows, streamlines and point probes. It comes in two parts:
+
+| | **Meerkat for Grasshopper** | **Meerkat Web** |
+|---|---|---|
+| Runs in | Rhino 8 / Grasshopper | Any modern browser |
+| Install | [Rhino Package Manager](https://rhinopackages.github.io/package/Meerkat) | Nothing – [open the app](https://trongtintr.github.io/Meerkat/) |
+| Best for | Linking results to design geometry, baking, parametric studies | Quick viewing, comparing scenarios, sharing with people without Rhino |
+
+<p align="center">
+  <img src="docs/images/overview.png" alt="Meerkat Web – overview" width="900">
+</p>
+
+---
+
+## Meerkat for Grasshopper
+
+### Install
+
+**Package Manager (recommended)**
+
+1. In Rhino 8, run the command `PackageManager`.
+2. Search for **Meerkat**. The current release is a beta, so tick **Include pre-releases**.
+3. Click **Install** and restart Rhino.
+
+Package page: **https://rhinopackages.github.io/package/Meerkat**
+
+**Manual install from this repository**
+
+Download the `.yak` file from [`grasshopper/release`](grasshopper/release) and install it with the Yak CLI that ships with Rhino 8:
+
+```bat
+"C:\Program Files\Rhino 8\System\Yak.exe" install meerkat-0.1.3-beta+20587-rh8-any.yak
+```
+
+The components appear on the **Meerkat** tab in Grasshopper.
+
+### Components
+
+| Group | Component | What it does |
+|---|---|---|
+| 1 · Read | **EDX_Reader** | Reads one variable of an EDX/EDT file on a plan (z) or vertical section (x / y) as a grid mesh, with date, time, unit, min / max, legend title and a building / no-data mask. |
+| 2 · Visualise | **Heatmap** | Fast heatmap or contour map (cells, smooth, contour + isolines, isoline and peak labels, legend, titles). Replaces LB Spatial Heatmap for ENVI-met data. |
+| 2 · Visualise | **Color palette** | Ready-made gradients (thermal comfort, wind speed, diverging …) or a custom gradient for Heatmap and Streamline colors. |
+| 3 · Wind | **Wind_Vectors** | Flat wind arrows from Flow u / v / w on a plan or section. |
+| 3 · Wind | **Wind_3D** | 3D arrows or streamlines (full 3D or on a slice), from seed points or an automatic grid; data cached between runs. |
+| 3 · Wind | **Streamline colors** | Colours streamlines by local wind speed as smooth vertex-coloured tubes, with a speed legend. |
+| 4 · Analyse | **Point Probe** | Reads result values at any points, with labels, units and an optional CSV table. |
+
+Requirements: Rhino 8 (Windows / macOS), ENVI-met output files.
+
+---
+
+## Meerkat Web
+
+**▶ https://trongtintr.github.io/Meerkat/**
+
+A single HTML page – no install, no server. Files are read locally in your browser and are never uploaded.
+
+### Usage
+
+1. Open the app, or download [`index.html`](index.html) and open it in a browser.
+2. Drop an `.EDX` file **together with** its `.EDT` file (same name). Several time steps or scenarios can be loaded at once.
+3. Choose variable, plane and slice; switch 2D / 3D with the buttons on the map.
+
+The 2D viewer works fully offline. The 3D view loads three.js from cdnjs the first time it is opened.
+
+### Display modes
+
+Cells, smooth, contour (filled bands + isolines) and UTCI thermal-stress classes, on a z level or a YZ / XZ section.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/mode_cell.png" alt="Cells mode" width="290"><br><sub>Cells</sub></td>
+    <td align="center"><img src="docs/images/mode_smooth.png" alt="Smooth mode" width="290"><br><sub>Smooth</sub></td>
+    <td align="center"><img src="docs/images/mode_contour.png" alt="Contour mode" width="290"><br><sub>Contour</sub></td>
+  </tr>
+</table>
+
+### Isolines and labels
+
+Lines and value labels switch independently; labels follow the line or stay horizontal.
+
+<p align="center"><img src="docs/images/isolines.png" alt="Contour map with isoline labels" width="750"></p>
+
+### Scenario comparison (A − B)
+
+Difference map between two scenarios or time steps on the same grid, with a symmetric diverging scale.
+
+<p align="center"><img src="docs/images/difference.png" alt="Difference map A minus B" width="750"></p>
+
+### Wind
+
+Arrows or 2D streamlines (arc-length RK2) from an atmosphere output, in a single colour or coloured by speed with their own legend.
+
+<p align="center"><img src="docs/images/streamlines.png" alt="Streamlines coloured by wind speed" width="750"></p>
+
+### 3D view
+
+Buildings from the no-data cells (taken from an atmosphere file when one is loaded), the current slice as a textured plane, vertical exaggeration, orbit / pan / zoom.
+
+<p align="center"><img src="docs/images/3d.gif" alt="3D view with buildings and a section" width="750"></p>
+
+### Probe points and export
+
+Click a cell to read every variable at that point. Export probes as CSV for one dataset or for all loaded time steps (long format), the whole slice as CSV, and the map as PNG (2–4×, also from the 3D view).
+
+<p align="center"><img src="docs/images/probes.png" alt="Probe points and value table" width="750"></p>
+
+### Palettes
+
+24 palettes – Ladybug, Ecotect, Leonardo-style, Viridis, Magma, Inferno, Plasma, Cividis, Turbo, ColorBrewer and diverging sets – plus a custom hex list and reverse.
+
+---
+
+## Repository layout
+
+```
+Meerkat/
+├── index.html                  Meerkat Web (served by GitHub Pages)
+├── docs/images/                screenshots for this README
+├── grasshopper/
+│   ├── release/                .yak packages (Rhino Package Manager format)
+│   ├── package/                Meerkat.Components.gha, manifest.yml, icon.png
+│   └── src/                    C# project of the compiled Grasshopper plugin
+├── LICENSE
+└── README.md
+```
+
+## ENVI-met file format notes
+
+EDT data are float32 little-endian, ordered variable → z → y → x; `-999` marks no data (buildings). Grid size, cell spacing and variable names are read from the EDX header; date and time from the header or, if missing, from the file name.
+
+## Author
+
+Trong-Tin Tran – Department of Civil Engineering, National Taiwan University
+
+## License
+
+MIT © 2026 Trong-Tin Tran
+
+## Third-party notices
+
+Meerkat Web bundles no third-party code. It uses or reproduces the following:
+
+- **three.js** r128 (MIT License) – loaded from cdnjs at runtime for the 3D view only.
+- **Colour palettes** – colour stops re-implemented from: matplotlib *viridis, magma, inferno, plasma* (CC0, Stéfan van der Walt & Nathaniel Smith); *cividis* (Nuñez, Anderton & Renslow, 2018); *Turbo* (Google LLC, Apache License 2.0); *ColorBrewer* schemes (Cynthia A. Brewer, Mark Harrower & The Pennsylvania State University, Apache License 2.0); default Ladybug Tools legend colours. The "Leonardo-style" palette is a generic rainbow, not taken from ENVI-met software.
+
+## Disclaimer
+
+Meerkat is an independent project and is not affiliated with, endorsed by or supported by ENVI-met GmbH. ENVI-met is a trademark of its respective owner. Meerkat contains no ENVI-met code or data; it only reads output files produced by the user's own licensed ENVI-met installation.
+
+This project is unrelated to *Meerkat GIS*, an earlier Grasshopper plugin for GIS data by another author.

@@ -1,0 +1,22 @@
+---
+name: Meerkat
+version: 0.1.3-beta+20587
+authors:
+- Trong-Tin Tran
+description: 'Meerkat – fast ENVI-met visualisation for Grasshopper: read EDX/EDT results, heatmaps, contours, wind and point probes.'
+license: ''
+url: ''
+icon: icon.png
+keywords:
+- guid:17a1a9cd-e5e2-42c7-9275-651037a73584
+- envi_met
+- envimet
+- microclimate
+- urban_climate
+- heatmap
+- contour
+- wind
+- streamline
+- thermal_comfort
+- visualization
+- edx
