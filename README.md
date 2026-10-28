@@ -92,25 +92,33 @@ Cells, smooth, contour (filled bands + isolines) and UTCI thermal-stress classes
 
 ### Time series
 
-Load all time steps of a run at once. Files with the same name apart from the date / time (e.g. `Site_AT_2025-06-21_10.00.01 … _18.00.01`) on the same grid form a series:
+Load every output file of a run at once. Files that share a name apart from the date and time (`Site_AT_2025-06-21_10.00.01`, `…_12.00.01`, …) and use the same grid are grouped into one time series.
 
-- **Time bar** under the map – step back / forward, drag the slider, or **▶ play** (speed and loop adjustable). Keyboard: **← / →** step, **Space** play / pause.
-- **Same colour range for all steps** – the automatic colour range is taken over the whole series, so colours stay comparable while playing.
-- **Scenario comparison over time** – when B is part of another series with the same time steps, B follows A, so A − B is always shown for the same hour.
-- **Value over time** – a chart of the current variable at every probe point and at the section point (✛). Hover for values, click to jump to that time step, export as CSV.
+| | |
+|---|---|
+| **Time bar** | Step through the hours with ⏮ ⏭ or the slider, or press ▶ to play. Speed and looping are adjustable. Keyboard: **← / →** to step, **Space** to play / pause. |
+| **Stable colours** | *Same colour range for all steps* fixes the colour scale to the minimum and maximum of the whole series, so maps of different hours can be compared directly. |
+| **A − B over time** | When the comparison file belongs to another series with the same time steps, it follows the time bar, so the difference map always compares the same hour. |
+| **Value over time** | A chart shows the current variable at every probe point and at the section point ✛. Hover to read values, click to jump to that hour, and export the series as CSV. |
 
-<!-- add a screenshot here: <p align="center"><img src="docs/images/timeseries.png" alt="Time bar and value-over-time chart" width="750"></p> -->
+<p align="center">
+  <img src="docs/images/timeseries.gif" alt="Playing a time series: plan, sections and value-over-time chart update hour by hour" width="900">
+</p>
 
 ### Sections at the cursor
 
-In plan view, two vertical sections – **XZ** (along x) and **YZ** (along y) – are drawn under the map through the point under the mouse:
+In plan view, two vertical sections are shown under the map: **XZ** (along x) and **YZ** (along y), crossing at the point you are looking at.
 
-- **Follow mouse** – the sections move as you hover the plan; **Fixed** – click the plan to place them (Shift+click adds a probe). Sliders set the column i and row j exactly.
-- The dashed line marks the current plan level: drag the **level k** slider and it moves up and down the sections; click a section to set the plan level and position there.
-- Same colours, modes, isolines and wind overlay as the plan; vertical scale *fill panel* or 1–10×, optional maximum height; PNG export per section.
-- Both sections also appear as vertical planes in the **3D view**.
+| | |
+|---|---|
+| **Position** | *Follow mouse* moves both sections as you hover the plan. *Fixed* places them with a click (Shift+click still adds a probe). Sliders set column i and row j exactly. |
+| **Plan level** | A dashed line marks the current level k and moves when you drag the level slider. Clicking a section sets the plan level and position at that point. |
+| **Display** | Same colours, mode, isolines and wind overlay as the plan. Vertical scale *fill panel* or 1–10×, optional maximum height, PNG export of each section. |
+| **3D** | Both sections are also drawn as vertical planes in the 3D view. |
 
-<!-- add a screenshot here: <p align="center"><img src="docs/images/sections.png" alt="XZ and YZ sections under the plan" width="750"></p> -->
+<p align="center">
+  <img src="docs/images/sections.gif" alt="XZ and YZ sections at the cursor, shown under the map and as planes in the 3D view" width="900">
+</p>
 
 ### Isolines and labels
 
