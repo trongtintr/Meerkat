@@ -15,7 +15,10 @@ Port of the Meerkat Grasshopper components:
   envimet_wind3d (slice) -> 2D streamlines on plan / section (arc-length RK2)
 Extra: scenario difference (A - B), UTCI stress classes, PNG / CSV export, pan / zoom,
        wind coloured by speed (gradient + legend), isolines on / off,
-       3D view (buildings from the no-data voxels + the current slice as a textured plane).
+       3D view (buildings from the no-data voxels + the current slice as a textured plane),
+       time series (files of one run grouped by date / time: time slider, playback, B follows A,
+       one colour range for all steps, value-over-time chart at probes and the cursor point),
+       XZ + YZ section panels through the mouse position or a fixed point (also shown in 3D).
 EDT layout: float32 little-endian, order variable -> z -> y -> x, -999 = no data.
 -->
 <style>
@@ -46,7 +49,7 @@ button:disabled{opacity:.45;cursor:default}
 .warn{color:#b45309}
 .err{color:#b91c1c}
 main{flex:1;display:flex;flex-direction:column;min-width:0}
-#stage{position:relative;flex:1;min-height:0;background:#fff}
+#stage{position:relative;flex:1;min-height:220px;background:#fff}
 #cv{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;touch-action:none}
 #drop{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--mute);font-size:15px;pointer-events:none;padding:20px}
 #drop small{font-size:12px;margin-top:4px}
@@ -57,9 +60,27 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 #viewBar button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
 #gl3d{position:absolute;inset:0;display:none;cursor:grab;touch-action:none}
 #gl3d canvas{display:block;width:100%!important;height:100%!important}
+#ov2d{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1}
 #ov3d{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none;z-index:2}
 #tip{position:absolute;pointer-events:none;background:rgba(20,24,33,.92);color:#fff;font-size:12px;padding:5px 7px;border-radius:4px;white-space:pre;display:none;z-index:3}
-#probes{max-height:200px;overflow:auto;background:var(--panel);border-top:1px solid var(--line);display:none}
+#timeBar{display:none;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;background:var(--panel);border-top:1px solid var(--line);font-size:12px}
+#timeBar button{padding:2px 9px;font-size:13px;line-height:20px;min-width:34px}
+#timeBar input[type=range]{flex:1 1 180px;min-width:120px;width:auto}
+#timeBar label{display:flex;align-items:center;gap:4px;color:var(--mute);white-space:nowrap}
+#timeBar select{padding:1px 4px}
+#tLabel{font-weight:600;white-space:nowrap}
+#tSync{margin:0}
+#secRow{display:none;gap:1px;background:var(--line);border-top:1px solid var(--line);height:230px;flex:none}
+.secBox{position:relative;flex:1;min-width:0;background:#fff}
+.secBox canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+.secPng,#tsCsv{position:absolute;right:6px;top:4px;padding:1px 6px;font-size:11px;opacity:.75;z-index:1}
+.secPng:hover,#tsCsv:hover{opacity:1}
+#bottomRow{display:none;border-top:1px solid var(--line);background:var(--panel);height:190px;flex:none}
+#tsBox{position:relative;flex:1.3;min-width:0;display:none;border-right:1px solid var(--line);background:#fff}
+#tsBox canvas{position:absolute;inset:0;width:100%;height:100%;cursor:pointer}
+#probes{flex:1;min-width:0;overflow:auto;background:var(--panel);display:none}
+#ftip{position:fixed;pointer-events:none;background:rgba(20,24,33,.92);color:#fff;font-size:12px;padding:5px 7px;border-radius:4px;white-space:pre;display:none;z-index:20}
+@media (max-width:760px){main{overflow-y:auto}#stage{flex:none;height:62vh}#secRow{flex-direction:column;height:auto!important}.secBox{height:170px;flex:none}#bottomRow{flex-direction:column;height:auto}#tsBox{height:170px;flex:none}}
 table{border-collapse:collapse;width:100%;font-size:12px}
 th,td{padding:3px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
 th{position:sticky;top:0;background:#fafbfc;font-weight:600}
@@ -161,6 +182,32 @@ td button{padding:0 6px;font-size:12px;line-height:18px}
     <div class="hint" id="windHint"></div>
   </fieldset>
 
+  <fieldset><legend>Sections at cursor (plan view)</legend>
+    <label class="row"><span>Show</span>
+      <select id="secMode">
+        <option value="off">Off</option>
+        <option value="follow" selected>Follow mouse</option>
+        <option value="fixed">Fixed – click to place</option>
+      </select></label>
+    <div class="hint" id="secHint">Two vertical sections (XZ and YZ) through the point under the mouse. In “Fixed” mode click the plan to move them; Shift+click adds a probe.</div>
+    <div class="hint">YZ section · column i</div>
+    <input type="range" id="secI" min="0" max="0" value="0">
+    <div class="hint" id="secILab">–</div>
+    <div class="hint">XZ section · row j</div>
+    <input type="range" id="secJ" min="0" max="0" value="0">
+    <div class="hint" id="secJLab">–</div>
+    <label class="row"><span>Vertical scale</span>
+      <select id="secEx">
+        <option value="auto">Fill panel</option>
+        <option value="1">1× (true)</option><option value="2">2×</option><option value="3">3×</option>
+        <option value="5">5×</option><option value="10">10×</option>
+      </select></label>
+    <label class="row"><span>Max height (m)</span><input type="number" id="secZmax" min="1" step="1" placeholder="all"></label>
+    <label class="row"><span>Panel height</span>
+      <select id="secH"><option value="170">Small</option><option value="230" selected>Medium</option><option value="320">Large</option></select></label>
+    <label class="chk"><input type="checkbox" id="sec3d" checked>Show both sections in the 3D view</label>
+  </fieldset>
+
   <fieldset><legend>3D view</legend>
     <div class="hint">Switch with the 2D / 3D buttons on the map. Drag = orbit, right-drag or Shift+drag = pan, wheel = zoom.</div>
     <label class="chk"><input type="checkbox" id="bld3d" checked>Show buildings</label>
@@ -188,13 +235,37 @@ td button{padding:0 6px;font-size:12px;line-height:18px}
 <main>
   <div id="stage">
     <canvas id="cv"></canvas>
+    <canvas id="ov2d"></canvas>
     <div id="gl3d"></div>
     <canvas id="ov3d"></canvas>
     <div id="viewBar"><button id="v2d" class="on">2D</button><button id="v3d">3D</button><button id="fitBtn">Fit view</button></div>
     <div id="drop">Drop ENVI-met .EDX + .EDT files here<small>or use “Open files…”</small></div>
     <div id="tip"></div>
   </div>
-  <div id="probes"><table><thead id="pHead"></thead><tbody id="pBody"></tbody></table></div>
+  <div id="timeBar">
+    <button id="tPrev" title="Previous time step (←)">⏮</button>
+    <button id="tPlay" class="pri" title="Play (Space)">▶</button>
+    <button id="tNext" title="Next time step (→)">⏭</button>
+    <input type="range" id="tSlider" min="0" max="0" value="0">
+    <span id="tLabel"></span>
+    <span id="tSync" class="hint"></span>
+    <label title="Time per step">Speed
+      <select id="tSpeed"><option value="2000">2 s</option><option value="1000" selected>1 s</option><option value="500">0.5 s</option><option value="250">0.25 s</option></select></label>
+    <label><input type="checkbox" id="tLoop" checked>Loop</label>
+    <label title="Auto colour range taken over all time steps, so colours are comparable while playing"><input type="checkbox" id="tsLock" checked>Same colour range for all steps</label>
+  </div>
+  <div id="secRow">
+    <div class="secBox" id="secBoxY"><canvas id="secCvY"></canvas>
+      <button class="secPng" data-p="Y" title="Save this section as PNG">PNG</button></div>
+    <div class="secBox" id="secBoxX"><canvas id="secCvX"></canvas>
+      <button class="secPng" data-p="X" title="Save this section as PNG">PNG</button></div>
+  </div>
+  <div id="bottomRow">
+    <div id="tsBox"><canvas id="tsCv"></canvas>
+      <button id="tsCsv" title="Time series of the points as CSV">CSV</button></div>
+    <div id="probes"><table><thead id="pHead"></thead><tbody id="pBody"></tbody></table></div>
+  </div>
+  <div id="ftip"></div>
   <div id="status">No data loaded.</div>
 </main>
 
@@ -282,7 +353,12 @@ const FONT = 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif';
 
 const $ = id => document.getElementById(id);
 const S = {sets: [], pending: {}, curKey: null, data: null, F: null, view: null,
-           probes: [], nextProbe: 1, token: 0, ms: 0};
+           probes: [], nextProbe: 1, token: 0, ms: 0,
+           tsRange: null, rangeCache: new Map(), ptCache: new Map(),
+           ts: {playing: false, run: 0},
+           // section panels: i = YZ column, j = XZ row; X / Y = {D, F, key} of each panel
+           sec: {i: 0, j: 0, X: null, Y: null, tok: 0, views: {}},
+           chart: {tok: 0, data: null, hover: -1}};
 const cv = $('cv');
 
 /* ====================================================================================
@@ -409,9 +485,21 @@ function cacheGet(ds, key, make) {
   while (c.size > 16) c.delete(c.keys().next().value);
   return p;
 }
+/* full 3D blocks are large: keep at most BLK.limit bytes of them across all files (LRU) */
+const BLK = {list: [], bytes: 0, limit: 600e6};
+function touchBlock(ds, key, bytes) {
+  const i = BLK.list.findIndex(e => e.ds === ds && e.key === key);
+  if (i >= 0) { BLK.list.push(BLK.list.splice(i, 1)[0]); return; }
+  BLK.list.push({ds, key, bytes}); BLK.bytes += bytes;
+  while (BLK.bytes > BLK.limit && BLK.list.length > 1) {
+    const e = BLK.list.shift(); BLK.bytes -= e.bytes; e.ds.cache.delete(e.key);
+  }
+}
 function varBlock(ds, vi) {
   const {nx, ny, nz} = ds.h, n3 = nx * ny * nz;
-  return cacheGet(ds, 'v' + vi, () => readF32(ds.edt, vi * n3, n3));
+  const p = cacheGet(ds, 'v' + vi, () => readF32(ds.edt, vi * n3, n3));
+  touchBlock(ds, 'v' + vi, n3 * 4);
+  return p;
 }
 async function zLevel(ds, vi, k) {
   const {nx, ny, nz} = ds.h, n2 = nx * ny;
@@ -460,7 +548,9 @@ function ui() {
     isoShow: g('isoShow').checked, palRev: g('palRev').checked, wPalRev: g('wPalRev').checked, wColMode: g('wColMode').value, wPal: g('wPal').value,
     wWidth: Math.min(6, Math.max(0.5, n('wWidth', 1.5))),
     bld3d: g('bld3d').checked, bldOp: Math.min(1, Math.max(0.1, n('bldOp', 0.9))),
-    zScale: Math.min(10, Math.max(1, n('zScale', 1))), box3d: g('box3d').checked
+    zScale: Math.min(10, Math.max(1, n('zScale', 1))), box3d: g('box3d').checked,
+    tsLock: g('tsLock').checked, secMode: g('secMode').value, secEx: g('secEx').value,
+    secZmax: n('secZmax', 0), sec3d: g('sec3d').checked
   };
 }
 const curDS = () => S.sets.find(d => d.key === S.curKey) || null;
@@ -492,8 +582,9 @@ async function addFiles(list) {
       for (const pr of S.probes) pr.vals.delete(b);
     } catch (e) { msgs.push(e.message); }
   }
-  const sk = d => (d.h.date || '') + ' ' + (d.h.time || '') + ' ' + d.name;
-  S.sets.sort((a, b) => sk(a).localeCompare(sk(b)));
+  const sk = d => seriesBase(d.name) + ' ' + (d.h.date || '') + ' ' + (d.h.time || '') + ' ' + d.name;
+  S.sets.sort((a, b) => sk(a).localeCompare(sk(b)));     // grouped by scenario, then by time
+  S.rangeCache.clear();
   listFiles(msgs);
   if (S.sets.length && !curDS()) { S.curKey = S.sets[0].key; }
   fillDatasetSel();
@@ -514,8 +605,8 @@ function fillDatasetSel() {
   sel.value = S.curKey || '';
   sel.disabled = !S.sets.length;
 }
-function fillCmpSel() {
-  const ds = curDS(), sel = $('cmpSel'), old = sel.value;
+function fillCmpSel(prefer) {
+  const ds = curDS(), sel = $('cmpSel'), old = prefer !== undefined ? prefer : sel.value;
   const ok = S.sets.filter(d => d !== ds && d.h.nx === ds.h.nx && d.h.ny === ds.h.ny && d.h.nz === ds.h.nz);
   sel.innerHTML = '<option value="">None</option>' +
     ok.map(d => `<option value="${esc(d.key)}">${esc(d.label === d.name ? d.name : d.label + ' · ' + d.name)}</option>`).join('');
@@ -554,11 +645,13 @@ function kLabel() {
             axis === 'x' ? `column i = ${k} · x = ${fmtN(h.xc[k], 2)} m` : `row j = ${k} · y = ${fmtN(h.yc[k], 2)} m`;
   $('kLabel').textContent = t;
 }
-async function onDataset(resetK) {
+async function onDataset(resetK, cmpKey) {
   const ds = curDS(); if (!ds) return;
   const prev = S.data && S.data.ds;
   const sameDims = prev && prev.h.nx === ds.h.nx && prev.h.ny === ds.h.ny && prev.h.nz === ds.h.nz;
-  fillVarSel(); fillCmpSel(); setSliceRange(resetK && !sameDims);
+  $('dsSel').value = ds.key;
+  fillVarSel(); fillCmpSel(cmpKey); setSliceRange(resetK && !sameDims);
+  if (!sameDims) setSecRange(true);
   windHint();
   for (const b of ['pngBtn', 'sliceCsvBtn']) $(b).disabled = false;
   $('drop').style.display = 'none'; $('viewBar').style.display = 'flex';
@@ -571,48 +664,180 @@ function windHint() {
 }
 
 /* ====================================================================================
+   time series: files with the same name apart from the date / time and the same grid
+   (e.g. Scenario_AT_2025-06-21_10.00.01 … _18.00.01) form one series
+   ==================================================================================== */
+const DT_TOKEN = /[-_ .]?\d{4}[-_.]\d{2}[-_.]\d{2}(?:[-_ T]?\d{2}[.:]?\d{2}(?:[.:]?\d{2})?)?/g;
+function seriesBase(name) { return norm(String(name).replace(DT_TOKEN, '')); }
+function seriesKey(d) { return seriesBase(d.name) + '|' + d.h.nx + 'x' + d.h.ny + 'x' + d.h.nz; }
+function timeMs(d) {
+  if (!d.h.date) return NaN;
+  const t = Date.parse(d.h.date + 'T' + (d.h.time || '00:00') + ':00Z');
+  return isFinite(t) ? t : NaN;
+}
+function seriesOf(ds) {
+  if (!ds) return [];
+  const k = seriesKey(ds);
+  return S.sets.filter(d => seriesKey(d) === k).sort((a, b) => {
+    const ta = timeMs(a), tb = timeMs(b);
+    return isFinite(ta) && isFinite(tb) && ta !== tb ? ta - tb : a.name.localeCompare(b.name);
+  });
+}
+const sameTime = (a, b) => (a.h.date || '') === (b.h.date || '') && (a.h.time || '') === (b.h.time || '') && (a.h.date || a.h.time);
+/* B "follows" A in time when B's own series has a file at A's date / time */
+function syncPartner(dsA, B) {
+  if (!B) return null;
+  const p = seriesOf(B).find(d => d !== dsA && sameTime(d, dsA));
+  return p || B;
+}
+/* slice values without filling the per-file cache (used for series-wide colour ranges) */
+async function rawSlice(ds, vi, axis, k) {
+  const {nx, ny, nz} = ds.h, n2 = nx * ny;
+  if (axis === 'z' || ds.cache.has('v' + vi)) return (await getSlice(ds, vi, axis, k)).vals;
+  if (axis === 'y') {
+    const v = new Float32Array(nx * nz);
+    for (let kk = 0; kk < nz; kk++) v.set(await readF32(ds.edt, (vi * nz + kk) * n2 + k * nx, nx), kk * nx);
+    return v;
+  }
+  const v = new Float32Array(ny * nz);
+  for (let kk = 0; kk < nz; kk++) {
+    const lvl = await readF32(ds.edt, (vi * nz + kk) * n2, n2);
+    for (let j = 0; j < ny; j++) v[kk * ny + j] = lvl[j * nx + k];
+  }
+  return v;
+}
+/* min / max of the slice over every time step of the series (A − B when comparing) */
+async function seriesRange(ser, vname, axis, k, B) {
+  const key = [ser.map(d => d.key).join(','), norm(vname), axis, k, B ? seriesOf(B).map(d => d.key).join(',') + '>' + B.key : ''].join('|');
+  if (S.rangeCache.has(key)) return S.rangeCache.get(key);
+  let lo = Infinity, hi = -Infinity;
+  for (const d of ser) {
+    const vi = d.h.vars.findIndex(n => norm(n) === norm(vname)); if (vi < 0) continue;
+    const a = await rawSlice(d, vi, axis, k);
+    let b = null;
+    if (B) {
+      const p = syncPartner(d, B), vb = p.h.vars.findIndex(n => norm(n) === norm(vname));
+      if (vb < 0) continue;
+      b = await rawSlice(p, vb, axis, k);
+    }
+    for (let q = 0; q < a.length; q++) {
+      const v = b ? (a[q] > LIM && b[q] > LIM ? a[q] - b[q] : NaN) : (a[q] > LIM ? a[q] : NaN);
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+  }
+  const r = isFinite(lo) && isFinite(hi) ? [lo, hi] : null;
+  S.rangeCache.set(key, r);
+  return r;
+}
+function updateTimeBar() {
+  const ds = curDS(), bar = $('timeBar'), ser = seriesOf(ds);
+  if (ser.length < 2) { bar.style.display = 'none'; if (S.ts.playing) stopPlay(); return; }
+  bar.style.display = 'flex';
+  const i = ser.indexOf(ds), r = $('tSlider');
+  r.max = ser.length - 1; r.value = i;
+  $('tLabel').textContent = `${ds.label === ds.name ? ds.name : ds.label}  ·  ${i + 1} / ${ser.length}`;
+  const cmp = $('cmpSel').value, B = cmp ? S.sets.find(d => d.key === cmp) : null;
+  $('tSync').textContent = B ? (seriesOf(B).length > 1 && sameTime(B, ds) ? 'B follows time' : 'B fixed') : '';
+}
+async function gotoStep(idx) {
+  const ds = curDS(); if (!ds) return;
+  const ser = seriesOf(ds);
+  idx = Math.max(0, Math.min(ser.length - 1, idx | 0));
+  const tgt = ser[idx]; if (!tgt || tgt === ds) return;
+  const cmp = $('cmpSel').value, B = cmp ? S.sets.find(d => d.key === cmp) : null;
+  const nb = B ? syncPartner(tgt, B) : null;
+  S.curKey = tgt.key;
+  await onDataset(false, nb && nb !== tgt ? nb.key : '');
+}
+function stepBy(d) { const ds = curDS(); if (ds) gotoStep(seriesOf(ds).indexOf(ds) + d); }
+function stopPlay() { S.ts.playing = false; S.ts.run++; $('tPlay').textContent = '▶'; $('tPlay').title = 'Play (Space)'; }
+async function startPlay() {
+  if (S.ts.playing) return;
+  const ds0 = curDS(); if (!ds0) return;
+  S.ts.playing = true; const run = ++S.ts.run;
+  $('tPlay').textContent = '❚❚'; $('tPlay').title = 'Pause (Space)';
+  const ser0 = seriesOf(ds0);
+  if (ser0.indexOf(ds0) === ser0.length - 1 && !$('tLoop').checked) await gotoStep(0);
+  while (S.ts.playing && run === S.ts.run) {
+    await new Promise(r => setTimeout(r, Math.max(30, +$('tSpeed').value)));
+    if (!S.ts.playing || run !== S.ts.run) break;
+    const ds = curDS(); if (!ds) break;
+    const ser = seriesOf(ds); let i = ser.indexOf(ds) + 1;
+    if (i >= ser.length) { if (!$('tLoop').checked) { stopPlay(); break; } i = 0; }
+    await gotoStep(i);
+  }
+}
+/* read the next time step's slice in the background so playback stays smooth */
+function prefetchNext() {
+  const ds = curDS(), D = S.data; if (!ds || !D) return;
+  const ser = seriesOf(ds); if (ser.length < 2) return;
+  if (D.axis !== 'z' && !S.ts.playing) return;
+  const nx = ser[(ser.indexOf(ds) + 1) % ser.length], vi = nx.h.vars.findIndex(n => norm(n) === norm(ds.h.vars[D.vi]));
+  if (vi >= 0) getSlice(nx, vi, D.axis, D.k).catch(() => {});
+}
+
+/* ====================================================================================
    data -> processing -> drawing
    ==================================================================================== */
+/* one 2D slice (optionally A − B and wind) -> data object used by every renderer */
+async function buildSlice(ds, B, vi, axis, k, windMode) {
+  const A = await getSlice(ds, vi, axis, k);
+  let vals = A.vals, diff = null;
+  if (B) {
+    const vn = norm(ds.h.vars[vi]), vb = B.h.vars.findIndex(n => norm(n) === vn);
+    if (vb < 0) throw new Error(`"${ds.h.vars[vi]}" is not in ${B.name}`);
+    const Bs = await getSlice(B, vb, axis, k);
+    vals = new Float32Array(A.vals.length);
+    for (let q = 0; q < vals.length; q++) {
+      const a = A.vals[q], b = Bs.vals[q];
+      vals[q] = (a > LIM && b > LIM) ? a - b : NaN;
+    }
+    diff = B;
+  }
+  let wind = null;
+  const iw = windIdx(ds.h);
+  if (windMode !== 'off' && iw) {
+    const [U, V, W] = (await Promise.all(iw.map(i => getSlice(ds, i, axis, k)))).map(s => s.vals);
+    const n = U.length, wf = new Uint8Array(n);
+    for (let q = 0; q < n; q++) if (U[q] <= LIM || V[q] <= LIM || W[q] <= LIM) wf[q] = 1;
+    wind = {hc: axis === 'x' ? V : U, vc: axis === 'z' ? V : W, wf};
+  }
+  return Object.assign({}, A, {vals, diff, wind, ds, axis, k, vi});
+}
 async function refresh(refit) {
   const ds = curDS(); if (!ds) return;
   const t = ++S.token, u = ui();
   try {
-    const A = await getSlice(ds, u.var, u.axis, u.k);
-    let vals = A.vals, diff = null;
-    if (u.cmp) {
-      const B = S.sets.find(d => d.key === u.cmp);
-      const vn = norm(ds.h.vars[u.var]), vb = B.h.vars.findIndex(n => norm(n) === vn);
-      if (vb < 0) throw new Error(`"${ds.h.vars[u.var]}" is not in ${B.name}`);
-      const Bs = await getSlice(B, vb, u.axis, u.k);
-      vals = new Float32Array(A.vals.length);
-      for (let q = 0; q < vals.length; q++) {
-        const a = A.vals[q], b = Bs.vals[q];
-        vals[q] = (a > LIM && b > LIM) ? a - b : NaN;
-      }
-      diff = B;
-    }
-    let wind = null;
-    const iw = windIdx(ds.h);
-    if (u.wind !== 'off' && iw) {
-      const [U, V, W] = (await Promise.all(iw.map(i => getSlice(ds, i, u.axis, u.k)))).map(s => s.vals);
-      const n = U.length, wf = new Uint8Array(n);
-      for (let q = 0; q < n; q++) if (U[q] <= LIM || V[q] <= LIM || W[q] <= LIM) wf[q] = 1;
-      wind = {hc: u.axis === 'x' ? V : U, vc: u.axis === 'z' ? V : W, wf};
-    }
+    const B = u.cmp ? S.sets.find(d => d.key === u.cmp) : null;
+    const D = await buildSlice(ds, B, u.var, u.axis, u.k, u.wind);
+    let range = null;
+    const ser = seriesOf(ds);
+    if (u.auto && u.tsLock && ser.length > 1) range = await seriesRange(ser, ds.h.vars[u.var], u.axis, u.k, B);
     if (t !== S.token) return;
-    S.data = Object.assign({}, A, {vals, diff, wind, ds, axis: u.axis, k: u.k, vi: u.var});
+    S.data = D; S.tsRange = range;
     if (refit || !S.view) fit();
     process();
     draw();
     syncProbes();
+    updateTimeBar();
+    updateSections();
+    updateChart();
+    prefetchNext();
   } catch (e) {
     if (t === S.token) status(e.message, true);
   }
 }
 
 function process() {
-  const D = S.data; if (!D) { S.F = null; return; }
-  const u = ui(), {na, nb, ea, eb, vals} = D, N = na * nb, NA = na + 1, NN = NA * (nb + 1);
+  S.F = S.data ? processData(S.data, ui(), {inputs: true, seriesRange: S.tsRange}) : null;
+}
+/* opts.inputs: write the auto range into the Min / Max boxes; opts.range: forced [vmin, vmax]
+   (section panels use the plan's range so colours match the legend); opts.seriesRange: [lo, hi]
+   over all time steps (auto range only) */
+function processData(D, u, opts) {
+  opts = opts || {};
+  const {na, nb, ea, eb, vals} = D, N = na * nb, NA = na + 1, NN = NA * (nb + 1);
   const filled = new Uint8Array(N);
   let dmin = Infinity, dmax = -Infinity, imin = -1, imax = -1;
   for (let q = 0; q < N; q++) {
@@ -622,16 +847,20 @@ function process() {
     if (v > dmax) { dmax = v; imax = q; }
   }
   const F = {filled, dmin, dmax, imin, imax, mode: u.mode, valid: imax >= 0};
-  S.F = F;
-  if (!F.valid) return;
+  if (!F.valid) return F;
 
   // ---- colour range
   let vmin, vmax;
-  if (u.auto) {
-    if (D.diff) { const m = Math.max(Math.abs(dmin), Math.abs(dmax)) || 1; vmin = -m; vmax = m; }
-    else { vmin = dmin; vmax = dmax; }
-    const d = Math.abs(vmax - vmin) < 10 ? 3 : 2;
-    $('vmin').value = +vmin.toFixed(d); $('vmax').value = +vmax.toFixed(d);
+  if (opts.range) {
+    [vmin, vmax] = opts.range;
+  } else if (u.auto) {
+    const lo = opts.seriesRange ? opts.seriesRange[0] : dmin, hi = opts.seriesRange ? opts.seriesRange[1] : dmax;
+    if (D.diff) { const m = Math.max(Math.abs(lo), Math.abs(hi)) || 1; vmin = -m; vmax = m; }
+    else { vmin = lo; vmax = hi; }
+    if (opts.inputs) {
+      const d = Math.abs(vmax - vmin) < 10 ? 3 : 2;
+      $('vmin').value = +vmin.toFixed(d); $('vmax').value = +vmax.toFixed(d);
+    }
   } else {
     vmin = isFinite(u.vmin) ? u.vmin : dmin; vmax = isFinite(u.vmax) ? u.vmax : dmax;
   }
@@ -695,6 +924,13 @@ function process() {
     }
   }
   if (D.wind) F.wind = prepWind(D, u);
+  return F;
+}
+/* run fn with S.data / S.F temporarily pointing at another slice (renderers read them) */
+function withData(D, F, fn) {
+  const sd = S.data, sf = S.F;
+  S.data = D; S.F = F;
+  try { return fn(); } finally { S.data = sd; S.F = sf; }
 }
 
 /* isolines: per triangle (cell split along n0-n2, as in the GH component), chained through
@@ -851,7 +1087,11 @@ function draw() {
   const t0 = performance.now();
   if (T3.on) update3d();
   else render(cv.getContext('2d'), W, H, dpr);
+  drawSecOverlay();
   S.ms = performance.now() - t0;
+  updateStatus();
+}
+function updateStatus() {
   const D = S.data, F = S.F;
   if (!D) return;
   const ds = D.ds, h = ds.h;
@@ -862,7 +1102,9 @@ function draw() {
 }
 
 /* ---------------------------------------------------------------- render */
-/* opts.view = custom view (3D texture), opts.texture = map only (no legend / title / frame) */
+/* opts.view = custom view {s, ox, oy, sy?} (sy = vertical scale, for exaggerated sections),
+   opts.texture = map only (no legend / title / frame), opts.section = section panel
+   (no labels / grid / legend; opts.after(ctx, X, Y) draws its markers) */
 function render(ctx, W, H, dpr, opts) {
   opts = opts || {};
   const PW = Math.round(W * dpr), PH = Math.round(H * dpr);
@@ -870,7 +1112,7 @@ function render(ctx, W, H, dpr, opts) {
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, PW, PH);
   const D = S.data, F = S.F, V = opts.view || S.view;
   if (!D || !F || !V || !F.valid) return;
-  const u = ui(), {na, nb, ea, eb} = D, NA = na + 1;
+  const u = ui(), {na, nb, ea, eb} = D, NA = na + 1, sy = V.sy || V.s;
 
   // ---- raster: per-pixel lookup of cell + position inside the cell
   const colA = new Int32Array(PW), colS = new Float32Array(PW), rowB = new Int32Array(PH), rowT = new Float32Array(PH);
@@ -879,8 +1121,13 @@ function render(ctx, W, H, dpr, opts) {
     colA[x] = a; colS[x] = a < 0 ? 0 : (w - ea[a]) / (ea[a + 1] - ea[a]);
   }
   for (let y = 0; y < PH; y++) {
-    const w = (V.oy - (y + 0.5) / dpr) / V.s, b = locEdge(eb, w);
+    const w = (V.oy - (y + 0.5) / dpr) / sy, b = locEdge(eb, w);
     rowB[y] = b; rowT[y] = b < 0 ? 0 : (w - eb[b]) / (eb[b + 1] - eb[b]);
+  }
+  if (opts.clip) {                                     // section panels: paint the plot area only
+    const [cx0, cy0, cx1, cy1] = opts.clip.map(v => v * dpr);
+    for (let x = 0; x < PW; x++) if (x + 0.5 < cx0 || x + 0.5 > cx1) colA[x] = -1;
+    for (let y = 0; y < PH; y++) if (y + 0.5 < cy0 || y + 0.5 > cy1) rowB[y] = -1;
   }
   const img = ctx.createImageData(PW, PH), d = img.data;
   d.fill(255);
@@ -909,24 +1156,33 @@ function render(ctx, W, H, dpr, opts) {
 
   // ---- vector overlays in CSS pixels
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const X = w => V.ox + w * V.s, Y = w => V.oy - w * V.s;
+  const X = w => V.ox + w * V.s, Y = w => V.oy - w * sy;
+  if (opts.clip) {
+    const [cx0, cy0, cx1, cy1] = opts.clip;
+    ctx.save(); ctx.beginPath(); ctx.rect(cx0, cy0, cx1 - cx0, cy1 - cy0); ctx.clip();
+  }
   if (!opts.texture) {
     ctx.strokeStyle = '#9aa0a8'; ctx.lineWidth = 1;
-    ctx.strokeRect(X(ea[0]), Y(eb[nb]), (ea[na] - ea[0]) * V.s, (eb[nb] - eb[0]) * V.s);
+    ctx.strokeRect(X(ea[0]), Y(eb[nb]), (ea[na] - ea[0]) * V.s, (eb[nb] - eb[0]) * sy);
   }
-  if (u.grid) drawGrid(ctx, W, H, X, Y, V);
+  if (u.grid && !opts.section) drawGrid(ctx, W, H, X, Y, V);
   if (F.iso && F.iso.length && u.isoShow) {
     ctx.strokeStyle = 'rgba(25,25,25,.7)'; ctx.lineWidth = 0.8; ctx.lineJoin = 'round';
     ctx.beginPath();
     for (const l of F.iso) { l.pts.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1]))); }
     ctx.stroke();
   }
-  if (F.wind) drawWind(ctx, F.wind, X, Y, V.s, u);
+  if (F.wind) drawWind(ctx, F.wind, X, Y, V.s, u, sy);
   const taken = [];
-  if (u.extremes) drawExtremes(ctx, X, Y, u, taken);
-  if (F.iso && u.isoLab) drawIsoLabels(ctx, W, H, X, Y, u, taken);   // independent of the lines
+  if (!opts.section) {
+    if (u.extremes) drawExtremes(ctx, X, Y, u, taken);
+    if (F.iso && u.isoLab) drawIsoLabels(ctx, W, H, X, Y, u, taken);   // independent of the lines
+  }
   drawProbeMarks(ctx, X, Y);
-  if (opts.texture) return;
+  if (opts.after) opts.after(ctx, X, Y);
+  if (opts.clip) ctx.restore();
+  if (opts.texture || opts.section) return;
+  if (opts.marks) drawSecMarks(ctx, X, Y);
   drawOverlay(ctx, W, H, u);
 }
 /* legend(s) + title, shared by the 2D map and the 3D overlay */
@@ -1004,7 +1260,8 @@ function drawIsoLabels(ctx, W, H, X, Y, u, taken) {
     }
   }
 }
-function drawWind(ctx, w, X, Y, s, u) {
+function drawWind(ctx, w, X, Y, s, u, sy) {
+  sy = sy || s;
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   const col = sp => w.byspeed ? windColor(w, sp) : u.wCol;
   const lw = u.wWidth;
@@ -1020,7 +1277,9 @@ function drawWind(ctx, w, X, Y, s, u) {
       if (sp < 1e-6) continue;
       const L = 0.9 * cell * u.aScale * Math.min(sp / w.vref, 1.5) * s;
       if (L < 1.5) continue;
-      const dx = hc / sp, dy = -vc / sp, x = X(cx), y = Y(cy);
+      let dx = hc * s, dy = -vc * sy;                 // direction in screen space (exaggeration-aware)
+      const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+      const x = X(cx), y = Y(cy);
       const tx = x - dx * L / 2, ty = y - dy * L / 2, hx = x + dx * L / 2, hy = y + dy * L / 2;
       const hl = Math.min(0.4 * L, Math.max(3, 0.18 * cell * s * u.aScale * 2)), c = col(sp);
       ctx.strokeStyle = c; ctx.lineWidth = lw;
@@ -1072,11 +1331,16 @@ function drawProbeMarks(ctx, X, Y) {
   for (const p of S.probes) {
     const c = probeOnSlice(p); if (!c) continue;
     const x = X(c[0]), y = Y(c[1]);
+    const col = probeColor(p);
     ctx.beginPath(); ctx.arc(x, y, 4.5, 0, 2 * Math.PI);
-    ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#111'; ctx.stroke();
-    ctx.fillStyle = '#111'; haloText(ctx, 'P' + p.id, x + 7, y - 7);
+    ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 2.2; ctx.strokeStyle = col; ctx.stroke();
+    ctx.fillStyle = col; haloText(ctx, 'P' + p.id, x + 7, y - 7);
   }
 }
+/* categorical colours shared by probe markers, the probe table and the time-series chart */
+const CAT = ['#1f77b4', '#d62728', '#2ca02c', '#9467bd', '#ff7f0e', '#17becf', '#8c564b', '#e377c2'];
+const probeColor = p => CAT[(p.id - 1) % CAT.length];
+const SEC_COL = {X: '#0c8599', Y: '#d6336c'};       // X = YZ section (column i), Y = XZ section (row j)
 function planeText(D) {
   const h = D.ds.h, k = D.k;
   return D.axis === 'z' ? `Plan · z = ${fmtN(h.zc[k], 2)} m (k ${k})` :
@@ -1086,7 +1350,14 @@ function drawLegend(ctx, W, H, u) {
   const D = S.data, F = S.F, h = D.ds.h, name = h.vars[D.vi], unit = unitOf(name), dec = u.dec;
   const head = [];
   wrap(D.diff ? 'Δ ' + name : name, 30).forEach(t => head.push({t, b: true}));
-  if (D.diff) head.push({t: `${D.ds.label}  −  ${D.diff.label}`});
+  if (D.diff) {
+    const a = D.ds, b = D.diff;
+    if (sameTime(a, b)) {
+      wrap(`${a.name.replace(DT_TOKEN, '')} − ${b.name.replace(DT_TOKEN, '')}`, 34).forEach(t => head.push({t}));
+      head.push({t: [a.h.date, a.h.time].filter(Boolean).join('  ')});
+    }
+    else head.push({t: `${a.label}  −  ${b.label}`});
+  }
   else if (h.date || h.time) head.push({t: [h.date, h.time].filter(Boolean).join('  ')});
   head.push({t: planeText(D)});
   head.push({t: `Min: ${fmtN(F.dmin, 2)} ${unit}`.trim()}, {t: `Max: ${fmtN(F.dmax, 2)} ${unit}`.trim()});
@@ -1234,15 +1505,15 @@ function probeVal(p, ds, name) {
 function renderProbes() {
   const box = $('probes'), has = S.probes.length > 0;
   for (const b of ['probeCsvBtn', 'probeAllBtn', 'probeClrBtn']) $(b).disabled = !has;
-  if (!has || !S.data) { box.style.display = 'none'; return; }
-  box.style.display = 'block';
+  if (!has || !S.data) { box.style.display = 'none'; updateBottomRow(); return; }
+  box.style.display = 'block'; updateBottomRow();
   const D = S.data, name = D.ds.h.vars[D.vi], unit = unitOf(name), dec = ui().dec + 1;
   $('pHead').innerHTML = `<tr><th>Point</th><th>i</th><th>j</th><th>k</th><th>x (m)</th><th>y (m)</th><th>z (m)</th>` +
     `<th>${esc(shortName(name))}${unit ? ' [' + esc(unit) + ']' : ''}${D.diff ? ' · A' : ''}</th>` +
     (D.diff ? '<th>B</th><th>Δ A−B</th>' : '') + '<th></th></tr>';
   $('pBody').innerHTML = S.probes.map(p => {
     const a = probeVal(p, D.ds, name), b = D.diff ? probeVal(p, D.diff, name) : null;
-    return `<tr><td>P${p.id}</td><td>${p.i}</td><td>${p.j}</td><td>${p.k}</td><td>${fmtN(p.x, 2)}</td><td>${fmtN(p.y, 2)}</td><td>${fmtN(p.z, 2)}</td>` +
+    return `<tr><td><span style="color:${probeColor(p)};font-weight:700">●</span> P${p.id}</td><td>${p.i}</td><td>${p.j}</td><td>${p.k}</td><td>${fmtN(p.x, 2)}</td><td>${fmtN(p.y, 2)}</td><td>${fmtN(p.z, 2)}</td>` +
       `<td>${a === null ? 'no data' : fmtN(a, dec)}</td>` +
       (D.diff ? `<td>${b === null ? 'no data' : fmtN(b, dec)}</td><td>${a === null || b === null ? '–' : fmtN(a - b, dec)}</td>` : '') +
       `<td><button data-del="${p.id}" title="Remove">×</button></td></tr>`;
@@ -1252,8 +1523,363 @@ async function addProbe(a, b) {
   const D = S.data, h = D.ds.h, [i, j, k] = cellIJK(D.axis, D.k, a, b);
   if (S.probes.some(p => p.i === i && p.j === j && p.k === k)) return;
   S.probes.push({id: S.nextProbe++, i, j, k, x: h.xc[i], y: h.yc[j], z: h.zc[k], vals: new Map()});
-  draw();
+  draw(); drawSections();
+  updateChart();
   await syncProbes();
+}
+
+/* ====================================================================================
+   section panels: XZ (row j) and YZ (column i) through the cursor / a fixed point
+   ==================================================================================== */
+function secActive(u) {
+  u = u || ui();
+  return u.secMode !== 'off' && S.data && S.data.axis === 'z' && S.F && S.F.valid;
+}
+function setSecRange(reset) {
+  const ds = curDS(); if (!ds) return;
+  const h = ds.h, ri = $('secI'), rj = $('secJ');
+  ri.max = h.nx - 1; rj.max = h.ny - 1;
+  if (reset || S.sec.i > h.nx - 1 || S.sec.j > h.ny - 1) { S.sec.i = h.nx >> 1; S.sec.j = h.ny >> 1; }
+  ri.value = S.sec.i; rj.value = S.sec.j;
+  secLabels();
+}
+function secLabels() {
+  const ds = curDS(); if (!ds) return;
+  const h = ds.h;
+  $('secILab').textContent = `i = ${S.sec.i} · x = ${fmtN(h.xc[S.sec.i], 1)} m`;
+  $('secJLab').textContent = `j = ${S.sec.j} · y = ${fmtN(h.yc[S.sec.j], 1)} m`;
+}
+/* move the section point (i, j) */
+function setSec(i, j) {
+  if (i === S.sec.i && j === S.sec.j) return;
+  S.sec.i = i; S.sec.j = j;
+  $('secI').value = i; $('secJ').value = j; secLabels();
+  drawSecOverlay();
+  scheduleSections();
+}
+let secPend = false;
+function scheduleSections() {
+  if (secPend) return; secPend = true;
+  requestAnimationFrame(() => { secPend = false; updateSections(); });
+}
+async function updateSections() {
+  const u = ui(), row = $('secRow'), on = secActive(u);
+  $('secHint').classList.toggle('warn', u.secMode !== 'off' && !!S.data && S.data.axis !== 'z');
+  if (u.secMode !== 'off' && S.data && S.data.axis !== 'z') $('secHint').textContent = 'Sections are shown in plan view – set Slice → Plane to “Plan (z level)”.';
+  else $('secHint').textContent = 'Two vertical sections (XZ and YZ) through the point under the mouse. In “Fixed” mode click the plan to move them; Shift+click adds a probe.';
+  row.style.display = on ? 'flex' : 'none';
+  row.style.height = u.secH + 'px';
+  if (!on) { S.sec.X = S.sec.Y = null; drawSecOverlay(); if (T3.on) updateSec3d(); updateChart(); return; }
+  const D = S.data, ds = D.ds, B = D.diff, tok = ++S.sec.tok;
+  const base = [ds.key, B ? B.key : '', D.vi, u.wind].join('|');
+  try {
+    for (const [p, axis, k] of [['X', 'x', S.sec.i], ['Y', 'y', S.sec.j]]) {
+      const key = base + '|' + axis + k;
+      if (!S.sec[p] || S.sec[p].key !== key) {
+        const Ds = await buildSlice(ds, B, D.vi, axis, k, u.wind);
+        if (tok !== S.sec.tok) return;
+        S.sec[p] = {D: Ds, key};
+      }
+    }
+  } catch (e) { status(e.message, true); return; }
+  if (tok !== S.sec.tok || !S.F || !S.F.valid) return;
+  for (const p of ['X', 'Y']) S.sec[p].F = processData(S.sec[p].D, u, {range: [S.F.vmin, S.F.vmax]});
+  drawSections();
+  drawSecOverlay();
+  if (T3.on) updateSec3d();
+  updateChart();
+}
+/* view of one section panel: equal or exaggerated vertical scale, ground at the bottom */
+function secView(D, W, H, u) {
+  const padL = 44, padR = 10, padT = 24, padB = 22;
+  const wa = D.ea[D.na] - D.ea[0];
+  const top = u.secZmax > 0 ? Math.min(D.eb[D.nb], D.eb[0] + u.secZmax) : D.eb[D.nb];
+  const wb = Math.max(1e-6, top - D.eb[0]);
+  const aw = Math.max(20, W - padL - padR), ah = Math.max(20, H - padT - padB);
+  let s, sy;
+  if (u.secEx === 'auto') { s = aw / wa; sy = Math.max(s, ah / wb); if (wb * sy > ah) sy = ah / wb; }
+  else { const ex = +u.secEx; s = Math.min(aw / wa, ah / (wb * ex)); sy = s * ex; }
+  const ox = padL + (aw - wa * s) / 2 - D.ea[0] * s;
+  const oy = padT + ah + D.eb[0] * sy;
+  return {s, sy, ox, oy, top, clip: [ox + D.ea[0] * s, oy - top * sy, ox + D.ea[D.na] * s, oy - D.eb[0] * sy]};
+}
+function niceStep(range, target) {
+  const raw = range / Math.max(1, target), p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
+  return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p;
+}
+function drawSections(scale) {
+  if (!secActive()) return;
+  for (const p of ['X', 'Y']) {
+    const P = S.sec[p]; if (!P || !P.F) continue;
+    const c = $('secCv' + p), r = c.parentElement.getBoundingClientRect();
+    const W = Math.max(50, r.width), H = Math.max(50, r.height), dpr = window.devicePixelRatio || 1;
+    c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+    S.sec.views[p] = drawSectionPanel(c.getContext('2d'), p, W, H, dpr);
+  }
+}
+/* one panel: map + level line + crossing line + axes + title; returns its view */
+function drawSectionPanel(ctx, p, W, H, dpr) {
+  const P = S.sec[p], D = P.D, F = P.F, u = ui(), h = D.ds.h, V = secView(D, W, H, u);
+  const pk = S.data ? S.data.k : null, kz = pk !== null ? h.zc[pk] : null;   // plan level (read before the swap)
+  const crossH = p === 'Y' ? h.xc[S.sec.i] : h.yc[S.sec.j];   // other section, along this panel's horizontal axis
+  withData(D, F, () => render(ctx, W, H, dpr, {view: V, section: true, clip: V.clip, after: (cx, X, Y) => {
+    cx.setLineDash([]); cx.lineWidth = 1.6; cx.strokeStyle = SEC_COL[p === 'Y' ? 'X' : 'Y'];
+    cx.beginPath(); cx.moveTo(X(crossH), Y(V.top)); cx.lineTo(X(crossH), Y(D.eb[0])); cx.stroke();
+    if (kz !== null && kz <= V.top) {
+      cx.setLineDash([6, 4]); cx.lineWidth = 1.4; cx.strokeStyle = '#111';
+      cx.beginPath(); cx.moveTo(X(D.ea[0]), Y(kz)); cx.lineTo(X(D.ea[D.na]), Y(kz)); cx.stroke(); cx.setLineDash([]);
+      cx.font = `600 11px ${FONT}`; cx.textAlign = 'left'; cx.textBaseline = 'bottom'; cx.fillStyle = '#111';
+      haloText(cx, `plan level k ${pk} · z ${fmtN(kz, 2)} m`, X(D.ea[0]) + 6, Y(kz) - 3);
+    }
+  }}));
+  // ---- frame, axes, title (outside the map)
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const [x0, y0, x1, y1] = V.clip;
+  ctx.strokeStyle = '#9aa0a8'; ctx.lineWidth = 1; ctx.strokeRect(x0 + .5, y0 + .5, x1 - x0 - 1, y1 - y0 - 1);
+  ctx.fillStyle = '#555'; ctx.font = `400 10.5px ${FONT}`;
+  const hs = niceStep(D.ea[D.na] - D.ea[0], Math.max(2, (x1 - x0) / 70));
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (let v = Math.ceil(D.ea[0] / hs) * hs; v <= D.ea[D.na] + 1e-9; v += hs) {
+    const x = V.ox + v * V.s; ctx.fillRect(x - .5, y1, 1, 3); ctx.fillText(fmtN(v, hs < 1 ? 1 : 0), x, y1 + 4);
+  }
+  const vs = niceStep(V.top - D.eb[0], Math.max(2, (y1 - y0) / 28));
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let v = Math.ceil(D.eb[0] / vs) * vs; v <= V.top + 1e-9; v += vs) {
+    const y = V.oy - v * V.sy; ctx.fillRect(x0 - 3, y - .5, 3, 1); ctx.fillText(fmtN(v, vs < 1 ? 1 : 0), x0 - 5, y);
+  }
+  ctx.save(); ctx.translate(11, (y0 + y1) / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center'; ctx.fillText('z (m)', 0, 0); ctx.restore();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = SEC_COL[p]; ctx.fillRect(x0, 8, 10, 10);
+  ctx.font = `600 12px ${FONT}`; ctx.fillStyle = '#111';
+  const ex = V.sy / V.s, name = (D.diff ? 'Δ ' : '') + shortName(h.vars[D.vi]);
+  const title = p === 'Y' ? `XZ section · y = ${fmtN(h.yc[D.k], 1)} m (row j ${D.k})` : `YZ section · x = ${fmtN(h.xc[D.k], 1)} m (column i ${D.k})`;
+  ctx.fillText(title, x0 + 15, 13);
+  const tw = ctx.measureText(title).width;
+  ctx.font = `400 11px ${FONT}`; ctx.fillStyle = '#666';
+  ctx.fillText(`${name} · ${p === 'Y' ? 'x' : 'y'} (m) →${Math.abs(ex - 1) > 0.05 ? ` · vertical ×${fmtN(ex, 1)}` : ''}`, x0 + 22 + tw, 13);
+  return V;
+}
+/* cursor-dependent marks on the plan, drawn on their own canvas so hovering stays fast */
+function drawSecMarks(ctx, X, Y) {
+  if (!secActive()) return;
+  const h = S.data.ds.h, x = X(h.xc[S.sec.i]), y = Y(h.yc[S.sec.j]);
+  const xa = X(h.xe[0]), xb = X(h.xe[h.nx]), ya = Y(h.ye[0]), yb = Y(h.ye[h.ny]);
+  ctx.lineWidth = 1.6; ctx.setLineDash([]);
+  ctx.strokeStyle = SEC_COL.Y; ctx.beginPath(); ctx.moveTo(xa, y); ctx.lineTo(xb, y); ctx.stroke();
+  ctx.strokeStyle = SEC_COL.X; ctx.beginPath(); ctx.moveTo(x, ya); ctx.lineTo(x, yb); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, 5, 0, 2 * Math.PI); ctx.fillStyle = '#fff'; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = '#111'; ctx.stroke();
+  ctx.font = `700 11px ${FONT}`; ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right'; ctx.fillStyle = SEC_COL.Y; haloText(ctx, 'XZ', xa - 4, y);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillStyle = SEC_COL.X; haloText(ctx, 'YZ', x, ya + 4);
+}
+function drawSecOverlay() {
+  const ov = $('ov2d'), [W, H] = stageSize(), dpr = window.devicePixelRatio || 1;
+  if (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr)) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
+  const ctx = ov.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, ov.width, ov.height);
+  if (T3.on || !S.view || !secActive()) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const V = S.view;
+  drawSecMarks(ctx, w => V.ox + w * V.s, w => V.oy - w * V.s);
+}
+function secHit(p, e) {
+  const V = S.sec.views[p], P = S.sec[p]; if (!V || !P) return null;
+  const r = e.target.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  const [x0, y0, x1, y1] = V.clip;
+  if (mx < x0 || mx > x1 || my < y0 || my > y1) return null;
+  const a = locEdge(P.D.ea, (mx - V.ox) / V.s), b = locEdge(P.D.eb, (V.oy - my) / V.sy);
+  return a < 0 || b < 0 ? null : {a, b, P};
+}
+function showFtip(e, text) {
+  const t = $('ftip');
+  if (!text) { t.style.display = 'none'; return; }
+  t.textContent = text; t.style.display = 'block';
+  const w = t.offsetWidth, hh = t.offsetHeight;
+  t.style.left = Math.min(e.clientX + 14, window.innerWidth - w - 6) + 'px';
+  t.style.top = Math.max(4, Math.min(e.clientY + 14, window.innerHeight - hh - 6)) + 'px';
+}
+for (const p of ['X', 'Y']) {
+  const c = $('secCv' + p);
+  c.addEventListener('pointermove', e => {
+    const hit = secHit(p, e); if (!hit) { showFtip(e, ''); return; }
+    const {a, b, P} = hit, D = P.D, h = D.ds.h, q = b * D.na + a, [i, j, k] = cellIJK(D.axis, D.k, a, b);
+    const name = h.vars[D.vi], v = P.F.filled[q] ? 'building / no data' : `${fmtN(D.vals[q], ui().dec + 2)} ${unitOf(name)}`.trim();
+    showFtip(e, `${D.diff ? 'Δ ' : ''}${shortName(name)}: ${v}\ni ${i} · j ${j} · k ${k}\nx ${fmtN(h.xc[i], 1)} · y ${fmtN(h.yc[j], 1)} · z ${fmtN(h.zc[k], 2)} m\nclick: set plan level here`);
+  });
+  c.addEventListener('pointerleave', e => showFtip(e, ''));
+  c.addEventListener('click', e => {
+    const hit = secHit(p, e); if (!hit) return;
+    const {a, b} = hit;
+    if (p === 'Y') setSec(a, S.sec.j); else setSec(S.sec.i, a);
+    $('kRange').value = b; kLabel(); refresh(false);
+  });
+}
+function exportSectionPNG(p) {
+  const P = S.sec[p]; if (!P || !P.F) return;
+  const r = $('secCv' + p).parentElement.getBoundingClientRect(), sc = +$('pngScale').value;
+  const c = document.createElement('canvas'), W = Math.max(50, r.width), H = Math.max(50, r.height);
+  c.width = Math.round(W * sc); c.height = Math.round(H * sc);
+  drawSectionPanel(c.getContext('2d'), p, W, H, sc);
+  const D = P.D, n = shortName(D.ds.h.vars[D.vi]).replace(/[^A-Za-z0-9]+/g, '_');
+  c.toBlob(b => download(b, `${D.ds.name}${D.diff ? '_minus_' + D.diff.name : ''}_${n}_${p === 'Y' ? 'XZ_j' : 'YZ_i'}${D.k}.png`), 'image/png');
+}
+
+/* ====================================================================================
+   time-series chart of the current variable at the probes and the section point
+   ==================================================================================== */
+function chartPoints() {
+  const pts = S.probes.map(p => ({label: 'P' + p.id, i: p.i, j: p.j, k: p.k, color: probeColor(p)}));
+  if (secActive()) pts.push({label: `✛ i${S.sec.i} j${S.sec.j} k${S.data.k}`, i: S.sec.i, j: S.sec.j, k: S.data.k, color: '#111', dash: true});
+  return pts;
+}
+async function pointVal(d, vname, p) {
+  const h = d.h, vi = h.vars.findIndex(n => norm(n) === norm(vname));
+  if (vi < 0 || p.i >= h.nx || p.j >= h.ny || p.k >= h.nz) return null;
+  const n2 = h.nx * h.ny, off = vi * n2 * h.nz + p.k * n2 + p.j * h.nx + p.i, key = d.key + '|' + off;
+  if (S.ptCache.has(key)) return S.ptCache.get(key);
+  const v = (await readF32(d.edt, off, 1))[0], r = v > LIM ? v : null;
+  if (S.ptCache.size > 50000) S.ptCache.clear();
+  S.ptCache.set(key, r);
+  return r;
+}
+function updateBottomRow() {
+  $('bottomRow').style.display = ($('tsBox').style.display === 'block' || $('probes').style.display === 'block') ? 'flex' : 'none';
+}
+let chartPend = false;
+function updateChart() {
+  if (chartPend) return; chartPend = true;
+  requestAnimationFrame(() => { chartPend = false; buildChart(); });
+}
+async function buildChart() {
+  const ds = curDS(), D = S.data, box = $('tsBox');
+  const ser = seriesOf(ds), pts = D ? chartPoints() : [];
+  const show = ser.length > 1 && pts.length > 0;
+  box.style.display = show ? 'block' : 'none'; updateBottomRow();
+  if (!show) { S.chart.data = null; return; }
+  const tok = ++S.chart.tok, vname = ds.h.vars[D.vi];
+  const B = D.diff || null;
+  try {
+    const lines = [];
+    for (const p of pts) {
+      const ys = await Promise.all(ser.map(async d => {
+        const a = await pointVal(d, vname, p);
+        if (!B || a === null) return a;
+        const b = await pointVal(syncPartner(d, B), vname, p);
+        return b === null ? null : a - b;
+      }));
+      if (tok !== S.chart.tok) return;
+      lines.push(Object.assign({}, p, {ys}));
+    }
+    const allT = ser.every(d => isFinite(timeMs(d)));
+    S.chart.data = {ser, lines, cur: ser.indexOf(ds), vname, diff: !!B, allT,
+                    xs: ser.map((d, i) => allT ? timeMs(d) : i)};
+    drawChart();
+  } catch (e) { status(e.message, true); }
+}
+function chartGeom(W, H) {
+  const c = S.chart.data, L = 50, R = 14, T = 38, Bm = 24;
+  const x0 = c.xs[0], x1 = c.xs[c.xs.length - 1] === x0 ? x0 + 1 : c.xs[c.xs.length - 1];
+  let lo = Infinity, hi = -Infinity;
+  for (const l of c.lines) for (const v of l.ys) if (v !== null) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  if (hi - lo < 1e-9) { lo -= 0.5; hi += 0.5; }
+  const padv = (hi - lo) * 0.08; lo -= padv; hi += padv;
+  const X = x => L + (x - x0) / (x1 - x0) * (W - L - R), Y = v => T + (hi - v) / (hi - lo) * (H - T - Bm);
+  return {L, R, T, Bm, lo, hi, X, Y};
+}
+function stepLabel(d, c) {
+  if (!d.h.time) return d.name;
+  const multiDay = c.ser.some(x => x.h.date !== c.ser[0].h.date);
+  return multiDay && d.h.date ? d.h.date.slice(5) + ' ' + d.h.time : d.h.time;
+}
+function drawChart(target, Wt, Ht, sc) {
+  const c = S.chart.data; if (!c) return;
+  let ctx, W, H, dpr;
+  if (target) { ctx = target; W = Wt; H = Ht; dpr = sc; }
+  else {
+    const cv2 = $('tsCv'), r = $('tsBox').getBoundingClientRect();
+    W = Math.max(80, r.width); H = Math.max(60, r.height); dpr = window.devicePixelRatio || 1;
+    cv2.width = Math.round(W * dpr); cv2.height = Math.round(H * dpr); ctx = cv2.getContext('2d');
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  const g = chartGeom(W, H), unit = unitOf(c.vname);
+  // grid + y ticks
+  const st = niceStep(g.hi - g.lo, Math.max(2, (H - g.T - g.Bm) / 28));
+  ctx.font = `400 10.5px ${FONT}`; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let v = Math.ceil(g.lo / st) * st; v <= g.hi + 1e-9; v += st) {
+    const y = g.Y(v);
+    ctx.fillStyle = '#eef0f3'; ctx.fillRect(g.L, Math.round(y), W - g.L - g.R, 1);
+    ctx.fillStyle = '#555'; ctx.fillText(fmtN(v, st < 1 ? Math.min(3, Math.ceil(-Math.log10(st))) : 0), g.L - 5, y);
+  }
+  // x labels (thinned so they do not overlap)
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const labs = c.ser.map(d => stepLabel(d, c)), lw = Math.max(...labs.map(l => ctx.measureText(l).width)) + 10;
+  const every = Math.max(1, Math.ceil(lw / ((W - g.L - g.R) / Math.max(1, c.ser.length - 1))));
+  c.ser.forEach((d, i) => {
+    const x = g.X(c.xs[i]);
+    ctx.fillStyle = '#ccc'; ctx.fillRect(Math.round(x), H - g.Bm, 1, 3);
+    if (i % every === 0 || i === c.ser.length - 1) { ctx.fillStyle = '#555'; ctx.fillText(labs[i], x, H - g.Bm + 5); }
+  });
+  ctx.strokeStyle = '#c8ccd3'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(g.L, H - g.Bm + .5); ctx.lineTo(W - g.R, H - g.Bm + .5); ctx.stroke();
+  // current step + hover guide
+  const cx = g.X(c.xs[c.cur]);
+  ctx.fillStyle = 'rgba(194,65,12,.12)'; ctx.fillRect(cx - 3, g.T, 6, H - g.T - g.Bm);
+  ctx.fillStyle = '#c2410c'; ctx.fillRect(Math.round(cx), g.T, 1, H - g.T - g.Bm);
+  if (S.chart.hover >= 0 && !target) { ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(Math.round(g.X(c.xs[S.chart.hover])), g.T, 1, H - g.T - g.Bm); }
+  // lines
+  for (const l of c.lines) {
+    ctx.strokeStyle = l.color; ctx.lineWidth = 1.8; ctx.setLineDash(l.dash ? [5, 3] : []);
+    ctx.beginPath(); let pen = false;
+    l.ys.forEach((v, i) => {
+      if (v === null) { pen = false; return; }
+      const x = g.X(c.xs[i]), y = g.Y(v);
+      if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+      pen = true;
+    });
+    ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = l.color;
+    l.ys.forEach((v, i) => { if (v !== null) { ctx.beginPath(); ctx.arc(g.X(c.xs[i]), g.Y(v), i === c.cur ? 3.6 : 2.2, 0, 2 * Math.PI); ctx.fill(); } });
+  }
+  // title + legend
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = `600 12px ${FONT}`; ctx.fillStyle = '#111';
+  const title = `${c.diff ? 'Δ ' : ''}${shortName(c.vname)}${unit ? ' (' + unit + ')' : ''} over time`;
+  ctx.fillText(title, 10, 12);
+  let lx = 10, ly = 28;
+  ctx.font = `400 11px ${FONT}`;
+  for (const l of c.lines) {
+    const w = ctx.measureText(l.label).width + 30;
+    if (lx + w > W - 50 && lx > 10) { lx = 10; ly += 13; }
+    ctx.strokeStyle = l.color; ctx.lineWidth = 2; ctx.setLineDash(l.dash ? [5, 3] : []);
+    ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx + 16, ly); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#333'; ctx.fillText(l.label, lx + 20, ly);
+    lx += w;
+  }
+}
+function chartIndexAt(e) {
+  const c = S.chart.data; if (!c) return -1;
+  const r = $('tsCv').getBoundingClientRect(), g = chartGeom(r.width, r.height), mx = e.clientX - r.left;
+  let best = -1, bd = Infinity;
+  c.xs.forEach((x, i) => { const d = Math.abs(g.X(x) - mx); if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+$('tsCv').addEventListener('pointermove', e => {
+  const c = S.chart.data, i = chartIndexAt(e); if (!c || i < 0) return;
+  if (i !== S.chart.hover) { S.chart.hover = i; drawChart(); }
+  const dec = ui().dec + 2, d = c.ser[i];
+  showFtip(e, `${d.label === d.name ? d.name : d.label}${i === c.cur ? '  (shown)' : ''}\n` +
+    c.lines.map(l => `${l.label}: ${l.ys[i] === null ? 'no data' : fmtN(l.ys[i], dec)}`).join('\n') + '\nclick: show this time step');
+});
+$('tsCv').addEventListener('pointerleave', e => { S.chart.hover = -1; drawChart(); showFtip(e, ''); });
+$('tsCv').addEventListener('click', e => { const i = chartIndexAt(e); if (i >= 0) gotoStep(i); });
+function exportChartCSV() {
+  const c = S.chart.data; if (!c) return;
+  const rows = [['dataset', 'date', 'time'].concat(c.lines.map(l => `${l.label} ${c.diff ? 'delta ' : ''}${c.vname}`)).map(csvCell).join(',')];
+  c.ser.forEach((d, i) => rows.push([d.name, d.h.date || '', d.h.time || ''].concat(c.lines.map(l => l.ys[i] === null ? '' : l.ys[i])).map(csvCell).join(',')));
+  download(new Blob(['﻿' + rows.join('\n')], {type: 'text/csv'}),
+           `${c.ser[0].name.replace(DT_TOKEN, '') || 'meerkat'}_${shortName(c.vname).replace(/[^A-Za-z0-9]+/g, '_')}_timeseries.csv`);
 }
 
 /* ====================================================================================
@@ -1276,7 +1902,7 @@ function exportPNG() {
     c.toBlob(b => download(b, fileBase() + '_3d.png'), 'image/png');
     return;
   }
-  render(c.getContext('2d'), W, H, sc);
+  render(c.getContext('2d'), W, H, sc, {marks: true});
   c.toBlob(b => download(b, fileBase() + '.png'), 'image/png');
 }
 
@@ -1379,19 +2005,19 @@ function buildingMesh(ds, blk, zs) {
   return new THREE.Mesh(g, m);
 }
 /* the current 2D map (same renderer as the 2D view, without legend) as a texture */
-function sliceTexture() {
+function sliceTexture(extra) {
   const D = S.data, wa = D.ea[D.na] - D.ea[0], wb = D.eb[D.nb] - D.eb[0];
   const css = 1100 / Math.max(wa, wb), W = wa * css, H = wb * css, dpr = 2;
   const c = document.createElement('canvas');
   c.width = Math.max(2, Math.round(W * dpr)); c.height = Math.max(2, Math.round(H * dpr));
-  render(c.getContext('2d'), W, H, dpr, {texture: true, view: {s: css, ox: -D.ea[0] * css, oy: D.eb[D.nb] * css}});
+  render(c.getContext('2d'), W, H, dpr, Object.assign({texture: true, view: {s: css, ox: -D.ea[0] * css, oy: D.eb[D.nb] * css}}, extra || {}));
   return c;
 }
-function sliceMesh(zs) {
+function sliceMesh(zs, extra) {
   const THREE = window.THREE, D = S.data, h = D.ds.h, k = D.k;
   const wa = D.ea[D.na] - D.ea[0], wb = D.eb[D.nb] - D.eb[0];
   const ca = (D.ea[0] + D.ea[D.na]) / 2, cb = (D.eb[0] + D.eb[D.nb]) / 2;
-  const tex = new THREE.CanvasTexture(sliceTexture());
+  const tex = new THREE.CanvasTexture(sliceTexture(extra));
   tex.anisotropy = T3.renderer.capabilities.getMaxAnisotropy();
   const mat = new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide});
   const m = new THREE.Mesh(new THREE.PlaneGeometry(wa, D.axis === 'z' ? wb : wb * zs), mat);
@@ -1483,9 +2109,23 @@ async function update3d() {
   // slice (always rebuilt: it carries the current colours / isolines / wind)
   dispose3(T3.slice);
   T3.slice = sliceMesh(zs); T3.slice.renderOrder = 1; T3.scene.add(T3.slice);
+  updateSec3d(true);
   const fitKey = [h.nx, h.ny, h.nz, zs].join('|');
   if (T3.fitted !== fitKey) { fit3d(); T3.fitted = fitKey; }
   render3dFrame();
+  updateStatus();
+}
+/* the two cursor sections as vertical textured planes in the 3D scene */
+function updateSec3d(noRender) {
+  if (!T3.renderer || !window.THREE) return;
+  dispose3(T3.secs); T3.secs = null;
+  const u = ui();
+  if (secActive(u) && u.sec3d && S.sec.X && S.sec.Y && S.sec.X.F && S.sec.Y.F) {
+    const g = new window.THREE.Group();
+    for (const p of ['X', 'Y']) g.add(withData(S.sec[p].D, S.sec[p].F, () => sliceMesh(u.zScale, {section: true})));
+    T3.secs = g; T3.scene.add(g);
+  }
+  if (!noRender) render3dFrame();
 }
 function setView(on) {
   T3.on = on;
@@ -1494,6 +2134,8 @@ function setView(on) {
   $('gl3d').style.display = on ? 'block' : 'none';
   $('ov3d').style.display = on ? 'block' : 'none';
   $('tip').style.display = 'none';
+  $('ov2d').style.display = on ? 'none' : '';
+  drawSecOverlay();
   if (on) { status('Loading 3D view…'); update3d(); } else draw();
 }
 function exportSliceCSV() {
@@ -1569,12 +2211,18 @@ cv.addEventListener('pointermove', e => {
     if (drag.moved) { S.view.ox = drag.ox + dx; S.view.oy = drag.oy + dy; $('tip').style.display = 'none'; schedule(); return; }
   }
   showTip(e, mx, my);
+  if (!drag && ui().secMode === 'follow' && secActive()) {        // sections follow the mouse
+    const c = cellAt(mx, my);
+    if (c) setSec(c.a, c.b);
+  }
 });
 cv.addEventListener('pointerup', e => {
   const d = drag; drag = null;
-  if (!d || d.moved || !ui().clickProbe) return;
-  const r = cv.getBoundingClientRect(), c = cellAt(e.clientX - r.left, e.clientY - r.top);
-  if (c) addProbe(c.a, c.b);
+  if (!d || d.moved) return;
+  const u = ui(), r = cv.getBoundingClientRect(), c = cellAt(e.clientX - r.left, e.clientY - r.top);
+  if (!c) return;
+  if (u.secMode === 'fixed' && secActive(u) && !e.shiftKey) { setSec(c.a, c.b); return; }
+  if (u.clickProbe) addProbe(c.a, c.b);
 });
 cv.addEventListener('pointerleave', () => { $('tip').style.display = 'none'; });
 cv.addEventListener('wheel', e => {
@@ -1586,6 +2234,8 @@ cv.addEventListener('wheel', e => {
   schedule();
 }, {passive: false});
 new ResizeObserver(() => { if (!S.data) return; if (T3.on) render3dFrame(); else schedule(); }).observe($('stage'));
+new ResizeObserver(() => { if (S.data) requestAnimationFrame(() => drawSections()); }).observe($('secRow'));
+new ResizeObserver(() => { if (S.chart.data) requestAnimationFrame(() => drawChart()); }).observe($('tsBox'));
 
 // drag & drop
 const stage = $('stage');
@@ -1595,12 +2245,15 @@ stage.addEventListener('drop', e => { e.preventDefault(); stage.classList.remove
 $('openBtn').onclick = () => $('fileIn').click();
 $('fileIn').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
 $('clearBtn').onclick = () => {
+  stopPlay();
   S.sets = []; S.pending = {}; S.curKey = null; S.data = null; S.F = null; S.view = null; S.probes = [];
+  S.sec.X = S.sec.Y = null; S.chart.data = null; S.rangeCache.clear(); S.ptCache.clear(); BLK.list = []; BLK.bytes = 0;
+  for (const id of ['timeBar', 'secRow', 'tsBox']) $(id).style.display = 'none';
   listFiles(); fillDatasetSel(); $('cmpSel').innerHTML = ''; $('varSel').innerHTML = '';
   for (const id of ['cmpSel', 'varSel', 'kRange', 'pngBtn', 'sliceCsvBtn']) $(id).disabled = true;
   if (T3.on) setView(false);
   $('drop').style.display = ''; $('viewBar').style.display = 'none'; $('kLabel').textContent = '–';
-  renderProbes(); draw(); status('No data loaded.');
+  renderProbes(); draw(); updateBottomRow(); status('No data loaded.');
 };
 $('fitBtn').onclick = () => { if (T3.on) { if (T3.renderer) { fit3d(); render3dFrame(); } } else { fit(); draw(); } };
 $('v2d').onclick = () => { if (T3.on) setView(false); };
@@ -1613,7 +2266,8 @@ $('varSel').onchange = () => refresh(false);
 $('axisSel').onchange = () => { if (curDS()) { setSliceRange(true); refresh(true); } };
 $('kRange').oninput = () => { kLabel(); refresh(false); };
 $('windSel').onchange = () => { windHint(); refresh(false); };
-const reprocess = () => { if (S.data) { process(); draw(); } };
+const reprocess = () => { if (S.data) { process(); draw(); updateSections(); } };
+const restyle = () => { if (S.data) { schedule(); requestAnimationFrame(() => drawSections()); } };
 for (const id of ['modeSel', 'levels', 'smooth', 'autoRange', 'palSel', 'aStep', 'aScale', 'aVref', 'seed', 'wColMode', 'wPal',
                   'palRev', 'wPalRev', 'palCustom'])
   $(id).addEventListener(['modeSel', 'palSel', 'autoRange', 'wColMode', 'wPal', 'palRev', 'wPalRev'].includes(id) ? 'change' : 'input', reprocess);
@@ -1629,19 +2283,45 @@ function palPreviews() {
 for (const id of ['palSel', 'wPal', 'palRev', 'wPalRev', 'palCustom', 'cmpSel']) $(id).addEventListener('input', palPreviews);
 palPreviews();
 for (const id of ['isoShow', 'wWidth', 'bld3d', 'bldOp', 'zScale', 'box3d'])
-  $(id).addEventListener(id === 'wWidth' || id === 'bldOp' || id === 'zScale' ? 'input' : 'change', () => { if (S.data) schedule(); });
+  $(id).addEventListener(id === 'wWidth' || id === 'bldOp' || id === 'zScale' ? 'input' : 'change', restyle);
 for (const id of ['vmin', 'vmax']) $(id).addEventListener('input', () => { $('autoRange').checked = false; reprocess(); });
 for (const id of ['bldCol', 'isoLab', 'isoHoriz', 'extremes', 'grid', 'dec', 'legN', 'rangeLab', 'labSize', 'title', 'wCol'])
-  $(id).addEventListener('input', () => { if (S.data) { schedule(); if (id === 'dec') renderProbes(); } });
+  $(id).addEventListener('input', () => { if (S.data) { restyle(); if (id === 'dec') { renderProbes(); drawChart(); } } });
 $('pngBtn').onclick = exportPNG;
 $('sliceCsvBtn').onclick = exportSliceCSV;
 $('probeCsvBtn').onclick = () => exportProbes(false);
 $('probeAllBtn').onclick = () => exportProbes(true);
-$('probeClrBtn').onclick = () => { S.probes = []; renderProbes(); draw(); };
+$('probeClrBtn').onclick = () => { S.probes = []; renderProbes(); draw(); drawSections(); updateChart(); };
 $('pBody').onclick = e => {
   const id = e.target.dataset && e.target.dataset.del;
-  if (id) { S.probes = S.probes.filter(p => p.id !== +id); renderProbes(); draw(); }
+  if (id) { S.probes = S.probes.filter(p => p.id !== +id); renderProbes(); draw(); drawSections(); updateChart(); }
 };
+
+// time series
+$('tPrev').onclick = () => stepBy(-1);
+$('tNext').onclick = () => stepBy(1);
+$('tPlay').onclick = () => { if (S.ts.playing) stopPlay(); else startPlay(); };
+$('tSlider').addEventListener('input', e => gotoStep(+e.target.value));
+$('tsLock').addEventListener('change', () => refresh(false));
+$('tsCsv').onclick = exportChartCSV;
+document.addEventListener('keydown', e => {
+  if ($('timeBar').style.display !== 'flex') return;
+  const t = e.target, tag = t && t.tagName;
+  if (tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && t.type !== 'range' && t.type !== 'checkbox')) return;
+  if (tag === 'INPUT' && t.type === 'range' && t.id !== 'tSlider') return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); stepBy(-1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); stepBy(1); }
+  else if (e.key === ' ') { e.preventDefault(); if (S.ts.playing) stopPlay(); else startPlay(); }
+});
+
+// sections
+$('secMode').addEventListener('change', () => { if (S.data) { updateSections(); draw(); } });
+$('secI').addEventListener('input', e => setSec(+e.target.value, S.sec.j));
+$('secJ').addEventListener('input', e => setSec(S.sec.i, +e.target.value));
+for (const id of ['secEx', 'secZmax']) $(id).addEventListener('input', () => drawSections());
+$('secH').addEventListener('change', () => { $('secRow').style.height = $('secH').value + 'px'; });
+$('sec3d').addEventListener('change', () => { if (T3.on) updateSec3d(); });
+for (const b of document.querySelectorAll('.secPng')) b.onclick = () => exportSectionPNG(b.dataset.p);
 </script>
 </body>
 </html>
